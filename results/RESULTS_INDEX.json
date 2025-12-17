@@ -1,0 +1,69 @@
+{
+  "summaries": [
+    {
+      "file": "results/2d_u1/beta2_seed111_s60000_stat_ir_lmax.json",
+      "final_status": "inconclusive",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 64,
+      "ir_l": 64,
+      "ir_channel": "smeared_best",
+      "ir_width": 14,
+      "ir_mean": 0.5489390726001029,
+      "ir_std": 0.14007860430563512,
+      "ir_chi2_ok": true,
+      "per_m0_0p1": "compatible"
+    },
+    {
+      "file": "results/2d_u1/beta2_seed1234_s60000_stat_ir_lmax.json",
+      "final_status": "inconclusive",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 64,
+      "ir_l": 64,
+      "ir_channel": "smeared_best",
+      "ir_width": 14,
+      "ir_mean": 0.5190078113447039,
+      "ir_std": 0.14152620006012057,
+      "ir_chi2_ok": true,
+      "per_m0_0p1": "compatible"
+    },
+    {
+      "file": "results/2d_u1/beta2_seed777_s60000_stat_ir_lmax.json",
+      "final_status": "compatible",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 64,
+      "ir_l": 64,
+      "ir_channel": "smeared_best",
+      "ir_width": 14,
+      "ir_mean": 0.7649485102893598,
+      "ir_std": 0.17580654117947742,
+      "ir_chi2_ok": true,
+      "per_m0_0p1": "compatible"
+    },
+    {
+      "file": "results/3d_su2/ic_test_A_hot_seed777_ls16-32_b1p6_s0p06_th2000_sw8000_me10_stat_ir_lmax.json",
+      "final_status": "inconclusive",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 32,
+      "ir_l": 32,
+      "ir_channel": "smeared_best",
+      "ir_width": 5,
+      "ir_mean": 0.044320849861780094,
+      "ir_std": 0.016558125469130155,
+      "ir_chi2_ok": true,
+      "per_m0_0p1": "inconclusive"
+    },
+    {
+      "file": "results/3d_su2/ord021d_su2_seed777_ls16-32_b1p6_s0p06_th2000_sw8000_me10_stat_ir_lmax.json",
+      "final_status": "inconclusive",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 32,
+      "ir_l": 32,
+      "ir_channel": "smeared_best",
+      "ir_width": 2,
+      "ir_mean": -0.02296126173804944,
+      "ir_std": 0.011027167526323213,
+      "ir_chi2_ok": true,
+      "per_m0_0p1": "inconclusive"
+    }
+  ]
+}

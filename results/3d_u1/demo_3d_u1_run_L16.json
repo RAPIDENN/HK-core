@@ -1,0 +1,1 @@
+{"result":{"trace_id":"MILL_U1_3D_L16_b2_seed123","lattice":{"dim":3,"l":16,"beta":2.0,"n_links":12288,"n_plaquettes":12288,"step_size":0.06},"observables":{"n_measurements":20,"plaquette_mean":0.8658709042507706,"plaquette_std":0.022585397796980163},"tests":{"translation_invariance_max_row_dev":0.02230199224677254,"reflection_positivity_estimate":20.27614821627794}}}
