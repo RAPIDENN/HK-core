@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target/
+
+# Local experiment outputs
+/out/
+/results_*.json
+
+# Python cache
+__pycache__/
+*.pyc
