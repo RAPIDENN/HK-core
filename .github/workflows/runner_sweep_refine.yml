@@ -1,0 +1,191 @@
+name: Runner Sweep (Refine)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to run (e.g. master, su2-3d)"
+        required: true
+        default: "su2-3d"
+      ls:
+        description: "Comma-separated L list (e.g. 16,24,32,48). Must be len>=2."
+        required: true
+        default: "24,32,48"
+      beta:
+        description: "beta (f64)"
+        required: true
+        default: "1.6"
+      n_thermal_sweeps:
+        description: "thermal sweeps"
+        required: true
+        default: "2000"
+      n_sweeps:
+        description: "measurement sweeps"
+        required: true
+        default: "8000"
+      measure_every:
+        description: "measure_every"
+        required: true
+        default: "10"
+      step_size:
+        description: "step_size (Metropolis only)"
+        required: true
+        default: "0.06"
+      plateau_mode:
+        description: "plateau_mode: stat | legacy"
+        required: true
+        default: "stat"
+      verdict_mode:
+        description: "verdict_mode: ir_lmax | unanimous"
+        required: true
+        default: "ir_lmax"
+      update_mode:
+        description: "MILL_UPDATE: (unset)=metropolis | hb | hb_or (only supported on su2-3d)"
+        required: true
+        default: "hb_or"
+      seeds:
+        description: "Comma-separated seeds (u64), e.g. 777,111,1234"
+        required: true
+        default: "777"
+
+env:
+  CARGO_TERM_COLOR: always
+  AUTH_TOKEN: devtoken
+  RUST_LOG: warn
+  MILL_IC: cold
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      seeds: ${{ steps.mk.outputs.seeds }}
+    steps:
+      - id: mk
+        name: Build seed matrix
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          seeds_raw=os.environ.get("SEEDS","")
+          seeds=[s.strip() for s in seeds_raw.split(",") if s.strip()]
+          seeds=[int(s) for s in seeds]
+          print("seeds="+json.dumps(seeds))
+          PY
+        env:
+          SEEDS: ${{ inputs.seeds }}
+
+  run:
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJson(needs.matrix.outputs.seeds) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Start server
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.update_mode }}" = "metropolis" ]; then
+            unset MILL_UPDATE
+          elif [ -n "${{ inputs.update_mode }}" ]; then
+            export MILL_UPDATE="${{ inputs.update_mode }}"
+          fi
+          ./target/release/hk-core > server.log 2>&1 &
+          echo $! > server.pid
+          for _ in $(seq 1 200); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "Server did not become healthy"
+          tail -n 200 server.log || true
+          exit 1
+
+      - name: Run /mill/refine
+        run: |
+          set -euo pipefail
+
+          cat > payload.json <<'JSON'
+          {
+            "ls": [],
+            "beta": 0.0,
+            "n_thermal_sweeps": 0,
+            "n_sweeps": 0,
+            "measure_every": 0,
+            "step_size": 0.0,
+            "seed": 0,
+            "plateau_mode": "",
+            "verdict_mode": ""
+          }
+          JSON
+
+          python3 - <<'PY'
+          import json
+          ls=[int(x.strip()) for x in "${{ inputs.ls }}".split(",") if x.strip()]
+          if len(ls) < 2:
+            raise SystemExit("ls must have len >= 2")
+          p=json.load(open("payload.json"))
+          p.update({
+            "ls": ls,
+            "beta": float("${{ inputs.beta }}"),
+            "n_thermal_sweeps": int("${{ inputs.n_thermal_sweeps }}"),
+            "n_sweeps": int("${{ inputs.n_sweeps }}"),
+            "measure_every": int("${{ inputs.measure_every }}"),
+            "step_size": float("${{ inputs.step_size }}"),
+            "seed": int("${{ matrix.seed }}"),
+            "plateau_mode": str("${{ inputs.plateau_mode }}"),
+            "verdict_mode": str("${{ inputs.verdict_mode }}"),
+          })
+          json.dump(p, open("payload.json","w"), indent=2, sort_keys=True)
+          PY
+
+          curl -sS -X POST http://127.0.0.1:8080/mill/refine \
+            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json \
+            > "out_seed${{ matrix.seed }}.json"
+
+          python3 - <<'PY'
+          import json
+          p="out_seed${{ matrix.seed }}.json"
+          d=json.load(open(p))
+          r=d["result"]
+          v=r["final_verdict"]
+          ir=v.get("ir_lmax") or {}
+          per=(ir.get("per_m0") or {})
+          print("ref:", "${{ inputs.ref }}")
+          print("MILL_UPDATE:", "${{ inputs.update_mode }}")
+          print("seed:", "${{ matrix.seed }}")
+          print("status:", v.get("status"), "rule:", v.get("rule_applied"))
+          print("ir_lmax:", {k: ir.get(k) for k in ["l","channel","smeared_steps","plateau_width","m_eff_mean","m_eff_std","chi2_dof"]})
+          print("per_m0 m0=0.1:", per.get("m0=0.1"))
+          PY
+
+      - name: Stop server
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+          tail -n 200 server.log || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-sweep-${{ inputs.ref }}-${{ inputs.update_mode }}-seed${{ matrix.seed }}
+          path: |
+            payload.json
+            out_seed${{ matrix.seed }}.json
+            server.log
+
