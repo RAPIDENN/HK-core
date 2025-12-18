@@ -1,0 +1,108 @@
+name: Demo Results (SU2 3D)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Dynamics mode: metropolis | hb | hb_or"
+        required: true
+        default: "hb_or"
+      seed:
+        description: "RNG seed (u64)"
+        required: true
+        default: "777"
+
+env:
+  CARGO_TERM_COLOR: always
+  AUTH_TOKEN: devtoken
+  RUST_LOG: warn
+  MILL_IC: cold
+
+jobs:
+  su2_3d_demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Start server
+        run: |
+          set -euo pipefail
+          export MILL_UPDATE="${{ inputs.mode }}"
+          ./target/release/hk-core > server.log 2>&1 &
+          echo $! > server.pid
+          for _ in $(seq 1 200); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "Server did not become healthy"
+          tail -n 200 server.log || true
+          exit 1
+
+      - name: Run /mill/refine (SU2 3D)
+        run: |
+          set -euo pipefail
+          export MILL_UPDATE="${{ inputs.mode }}"
+          cat > payload.json <<'JSON'
+          {
+            "ls": [16, 24, 32],
+            "beta": 1.6,
+            "n_thermal_sweeps": 2000,
+            "n_sweeps": 8000,
+            "measure_every": 10,
+            "step_size": 0.06,
+            "seed": 0,
+            "plateau_mode": "stat",
+            "verdict_mode": "ir_lmax"
+          }
+          JSON
+          python3 - <<'PY'
+          import json
+          p=json.load(open("payload.json"))
+          p["seed"]=int("${{ inputs.seed }}")
+          json.dump(p, open("payload.json","w"), indent=2, sort_keys=True)
+          PY
+
+          curl -sS -X POST http://127.0.0.1:8080/mill/refine \
+            -H "Authorization: Bearer ${AUTH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json \
+            > out.json
+
+          python3 - <<'PY'
+          import json
+          d=json.load(open("out.json"))
+          r=d["result"]
+          v=r["final_verdict"]
+          ir=v.get("ir_lmax") or {}
+          per=(ir.get("per_m0") or {})
+          print("status:", v.get("status"), "rule:", v.get("rule_applied"))
+          print("ir_lmax:", {k: ir.get(k) for k in ["l","channel","smeared_steps","plateau_width","m_eff_mean","m_eff_std","chi2_dof"]})
+          print("per_m0 m0=0.1:", per.get("m0=0.1"))
+          if str("${{ inputs.mode }}") == "hb_or" and int("${{ inputs.seed }}")==777:
+            assert per.get("m0=0.1") == "compatible"
+          PY
+
+      - name: Stop server
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
+          tail -n 200 server.log || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: su2-3d-demo-${{ inputs.mode }}-seed${{ inputs.seed }}
+          path: |
+            payload.json
+            out.json
+            server.log
