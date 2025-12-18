@@ -1,0 +1,10 @@
+{
+  "ls": [16, 24, 32],
+  "beta": 1.6,
+  "n_thermal_sweeps": 2000,
+  "n_sweeps": 8000,
+  "measure_every": 10,
+  "step_size": 0.06,
+  "plateau_mode": "stat",
+  "verdict_mode": "ir_lmax"
+}

@@ -15,6 +15,14 @@ This branch adds an opt-in initial-condition switch via environment variable:
 
 These modes are for **instrumental coupling tests** only. Results obtained under non-default IC must be reported as such.
 
+## Instrumental dynamics (mixing test)
+This branch also supports an opt-in update-mode switch via environment variable:
+- `MILL_UPDATE` unset (default): Metropolis random-link sweep (uses `step_size`)
+- `MILL_UPDATE=hb` / `heatbath`: SU(2) heatbath sweep (ignores `step_size`)
+- `MILL_UPDATE=hb_or`: heatbath + overrelaxation sweeps (ignores `step_size`)
+
+This is intended to test whether observability limits in 3D are **dynamic (mixing/autocorrelation)** rather than geometric.
+
 ## Run locally
 ```bash
 export AUTH_TOKEN=devtoken
@@ -22,9 +30,12 @@ export RUST_LOG=info
 # optional:
 # export MILL_IC=hot
 # export MILL_IC=smooth
+# export MILL_UPDATE=hb_or
 cargo run --release
 ```
 
 ## Notes
 - `master` remains the canonical 2D U(1) validated release line.
 - Outputs in `out/` are intentionally not committed.
+- Canonical A/B artifacts for this branch are tracked in `results/`:
+  - `results/README.md`
