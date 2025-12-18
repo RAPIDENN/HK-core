@@ -1301,14 +1301,14 @@ fn run_mill_with_rp(
 
     let thermal = cfg.n_thermal_sweeps;
     for _ in 0..thermal {
-        metropolis_sweep(&mut field, cfg.beta, cfg.step_size, &mut rng);
+        su2_sweep_update(&mut field, cfg.beta, cfg.step_size, &mut rng);
     }
 
     let measure_every = cfg.measure_every;
     let mut measurements: Vec<f64> = Vec::new();
 
     for sweep in 0..cfg.n_sweeps {
-        metropolis_sweep(&mut field, cfg.beta, cfg.step_size, &mut rng);
+        su2_sweep_update(&mut field, cfg.beta, cfg.step_size, &mut rng);
         if (sweep + 1) % measure_every == 0 {
             let p = field.plaquette_mean();
             measurements.push(p);
@@ -1356,6 +1356,13 @@ enum IcMode {
     Smooth,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateMode {
+    Metropolis,
+    Heatbath,
+    HeatbathOverrelax,
+}
+
 fn parse_ic_mode_from_env() -> IcMode {
     match std::env::var("MILL_IC")
         .ok()
@@ -1366,6 +1373,19 @@ fn parse_ic_mode_from_env() -> IcMode {
         Some("hot") => IcMode::Hot,
         Some("smooth") => IcMode::Smooth,
         _ => IcMode::Cold,
+    }
+}
+
+fn parse_update_mode_from_env() -> UpdateMode {
+    match std::env::var("MILL_UPDATE")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some("heatbath") | Some("hb") => UpdateMode::Heatbath,
+        Some("hb_or") | Some("heatbath_overrelax") => UpdateMode::HeatbathOverrelax,
+        _ => UpdateMode::Metropolis,
     }
 }
 
@@ -1474,6 +1494,14 @@ fn local_cos_sum_for_link_z(cfg: &Su2Gauge3D, x: usize, y: usize, z: usize) -> f
         + cfg.plaquette_cos_yz(x, ym, z)
 }
 
+fn su2_sweep_update(cfg: &mut Su2Gauge3D, beta: f64, step_size: f64, rng: &mut StdRng) {
+    match parse_update_mode_from_env() {
+        UpdateMode::Metropolis => metropolis_sweep(cfg, beta, step_size, rng),
+        UpdateMode::Heatbath => heatbath_sweep(cfg, beta, rng),
+        UpdateMode::HeatbathOverrelax => heatbath_overrelax_sweep(cfg, beta, rng),
+    }
+}
+
 fn metropolis_sweep(cfg: &mut Su2Gauge3D, beta: f64, step_size: f64, rng: &mut StdRng) {
     let l = cfg.l;
     let n_links = 3 * l * l * l;
@@ -1521,6 +1549,208 @@ fn metropolis_sweep(cfg: &mut Su2Gauge3D, beta: f64, step_size: f64, rng: &mut S
             }
         }
     }
+}
+
+fn staple_sum_for_link_x(cfg: &Su2Gauge3D, x: usize, y: usize, z: usize) -> Su2 {
+    let xp = cfg.wrap(x as isize + 1);
+    let yp = cfg.wrap(y as isize + 1);
+    let ym = cfg.wrap(y as isize - 1);
+    let zp = cfg.wrap(z as isize + 1);
+    let zm = cfg.wrap(z as isize - 1);
+
+    let s_xy_f = cfg
+        .link_y(xp, y, z)
+        .mul(cfg.link_x(x, yp, z).dagger())
+        .mul(cfg.link_y(x, y, z).dagger());
+    let s_xy_b = cfg
+        .link_y(xp, ym, z)
+        .dagger()
+        .mul(cfg.link_x(x, ym, z).dagger())
+        .mul(cfg.link_y(x, ym, z));
+
+    let s_xz_f = cfg
+        .link_z(xp, y, z)
+        .mul(cfg.link_x(x, y, zp).dagger())
+        .mul(cfg.link_z(x, y, z).dagger());
+    let s_xz_b = cfg
+        .link_z(xp, y, zm)
+        .dagger()
+        .mul(cfg.link_x(x, y, zm).dagger())
+        .mul(cfg.link_z(x, y, zm));
+
+    s_xy_f.add(s_xy_b).add(s_xz_f).add(s_xz_b)
+}
+
+fn staple_sum_for_link_y(cfg: &Su2Gauge3D, x: usize, y: usize, z: usize) -> Su2 {
+    let xp = cfg.wrap(x as isize + 1);
+    let xm = cfg.wrap(x as isize - 1);
+    let yp = cfg.wrap(y as isize + 1);
+    let zp = cfg.wrap(z as isize + 1);
+    let zm = cfg.wrap(z as isize - 1);
+
+    let s_xy_f = cfg
+        .link_x(x, yp, z)
+        .mul(cfg.link_y(xp, y, z).dagger())
+        .mul(cfg.link_x(x, y, z).dagger());
+    let s_xy_b = cfg
+        .link_x(xm, yp, z)
+        .dagger()
+        .mul(cfg.link_y(xm, y, z).dagger())
+        .mul(cfg.link_x(xm, y, z));
+
+    let s_yz_f = cfg
+        .link_z(x, yp, z)
+        .mul(cfg.link_y(x, y, zp).dagger())
+        .mul(cfg.link_z(x, y, z).dagger());
+    let s_yz_b = cfg
+        .link_z(x, yp, zm)
+        .dagger()
+        .mul(cfg.link_y(x, y, zm).dagger())
+        .mul(cfg.link_z(x, y, zm));
+
+    s_xy_f.add(s_xy_b).add(s_yz_f).add(s_yz_b)
+}
+
+fn staple_sum_for_link_z(cfg: &Su2Gauge3D, x: usize, y: usize, z: usize) -> Su2 {
+    let xp = cfg.wrap(x as isize + 1);
+    let xm = cfg.wrap(x as isize - 1);
+    let yp = cfg.wrap(y as isize + 1);
+    let ym = cfg.wrap(y as isize - 1);
+    let zp = cfg.wrap(z as isize + 1);
+
+    let s_xz_f = cfg
+        .link_x(x, y, zp)
+        .mul(cfg.link_z(xp, y, z).dagger())
+        .mul(cfg.link_x(x, y, z).dagger());
+    let s_xz_b = cfg
+        .link_x(xm, y, zp)
+        .dagger()
+        .mul(cfg.link_z(xm, y, z).dagger())
+        .mul(cfg.link_x(xm, y, z));
+
+    let s_yz_f = cfg
+        .link_y(x, y, zp)
+        .mul(cfg.link_z(x, yp, z).dagger())
+        .mul(cfg.link_y(x, y, z).dagger());
+    let s_yz_b = cfg
+        .link_y(x, ym, zp)
+        .dagger()
+        .mul(cfg.link_z(x, ym, z).dagger())
+        .mul(cfg.link_y(x, ym, z));
+
+    s_xz_f.add(s_xz_b).add(s_yz_f).add(s_yz_b)
+}
+
+fn su2_modified_normal(param_exp: f64, rng: &mut StdRng) -> f64 {
+    let r0 = rng.gen::<f64>().max(1e-12);
+    let r1 = rng.gen::<f64>();
+    let r2 = rng.gen::<f64>().max(1e-12);
+    let c = (TAU * r1).cos();
+    let v = -((r0.ln() + c * c * r2.ln()) / (2.0 * param_exp));
+    v.max(0.0).sqrt()
+}
+
+fn su2_heatbath_sample_x0(param_exp: f64, rng: &mut StdRng) -> f64 {
+    if !(param_exp.is_finite() && param_exp > 0.0) {
+        return 1.0;
+    }
+    loop {
+        let r = rng.gen::<f64>();
+        let lambda = su2_modified_normal(param_exp, rng);
+        if r * r <= 1.0 - lambda * lambda {
+            return (1.0 - 2.0 * lambda * lambda).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn su2_heatbath_sample(param_exp: f64, rng: &mut StdRng) -> Su2 {
+    let x0 = su2_heatbath_sample_x0(param_exp, rng);
+    let s = (1.0 - x0 * x0).max(0.0).sqrt();
+    let mut x1 = rand_std_normal(rng);
+    let mut x2 = rand_std_normal(rng);
+    let mut x3 = rand_std_normal(rng);
+    let mut n2 = x1 * x1 + x2 * x2 + x3 * x3;
+    while !(n2.is_finite() && n2 > 1e-12) {
+        x1 = rand_std_normal(rng);
+        x2 = rand_std_normal(rng);
+        x3 = rand_std_normal(rng);
+        n2 = x1 * x1 + x2 * x2 + x3 * x3;
+    }
+    let inv = 1.0 / n2.sqrt();
+    Su2 {
+        a0: x0,
+        a1: s * x1 * inv,
+        a2: s * x2 * inv,
+        a3: s * x3 * inv,
+    }
+    .projected()
+}
+
+fn su2_heatbath_update(staple_sum: Su2, beta: f64, rng: &mut StdRng) -> Su2 {
+    let k2 = staple_sum.norm2();
+    if !(k2.is_finite() && k2.is_normal() && k2 > 0.0) {
+        return su2_random_haar(rng);
+    }
+    let k = k2.sqrt();
+    let v_dag = staple_sum.dagger().scale(1.0 / k);
+    let r = su2_heatbath_sample(beta * k, rng);
+    r.mul(v_dag).projected()
+}
+
+fn su2_overrelax_update(u: Su2, staple_sum: Su2) -> Su2 {
+    let v = staple_sum.projected();
+    let v_dag = v.dagger();
+    v_dag.mul(u.dagger()).mul(v_dag).projected()
+}
+
+fn heatbath_sweep(cfg: &mut Su2Gauge3D, beta: f64, rng: &mut StdRng) {
+    let l = cfg.l;
+    let n_links = 3 * l * l * l;
+    for _ in 0..n_links {
+        let dir = rng.gen_range(0..3);
+        let x = rng.gen_range(0..l);
+        let y = rng.gen_range(0..l);
+        let z = rng.gen_range(0..l);
+        if dir == 0 {
+            let staple = staple_sum_for_link_x(cfg, x, y, z);
+            cfg.set_link_x(x, y, z, su2_heatbath_update(staple, beta, rng));
+        } else if dir == 1 {
+            let staple = staple_sum_for_link_y(cfg, x, y, z);
+            cfg.set_link_y(x, y, z, su2_heatbath_update(staple, beta, rng));
+        } else {
+            let staple = staple_sum_for_link_z(cfg, x, y, z);
+            cfg.set_link_z(x, y, z, su2_heatbath_update(staple, beta, rng));
+        }
+    }
+}
+
+fn overrelax_sweep(cfg: &mut Su2Gauge3D, rng: &mut StdRng) {
+    let l = cfg.l;
+    let n_links = 3 * l * l * l;
+    for _ in 0..n_links {
+        let dir = rng.gen_range(0..3);
+        let x = rng.gen_range(0..l);
+        let y = rng.gen_range(0..l);
+        let z = rng.gen_range(0..l);
+        if dir == 0 {
+            let old = cfg.link_x(x, y, z);
+            let staple = staple_sum_for_link_x(cfg, x, y, z);
+            cfg.set_link_x(x, y, z, su2_overrelax_update(old, staple));
+        } else if dir == 1 {
+            let old = cfg.link_y(x, y, z);
+            let staple = staple_sum_for_link_y(cfg, x, y, z);
+            cfg.set_link_y(x, y, z, su2_overrelax_update(old, staple));
+        } else {
+            let old = cfg.link_z(x, y, z);
+            let staple = staple_sum_for_link_z(cfg, x, y, z);
+            cfg.set_link_z(x, y, z, su2_overrelax_update(old, staple));
+        }
+    }
+}
+
+fn heatbath_overrelax_sweep(cfg: &mut Su2Gauge3D, beta: f64, rng: &mut StdRng) {
+    heatbath_sweep(cfg, beta, rng);
+    overrelax_sweep(cfg, rng);
 }
 
 fn su2_random_near_identity(step_size: f64, rng: &mut StdRng) -> Su2 {
@@ -2845,5 +3075,65 @@ mod su2_kernel_tests {
             }
         }
         assert!(max_dev < 1e-10, "max |norm2-1| too large: {}", max_dev);
+    }
+
+    #[test]
+    fn su2_heatbath_sampler_stays_in_su2() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let u = su2_heatbath_sample(3.0, &mut rng);
+        approx_eq(u.norm2(), 1.0, 1e-12);
+    }
+
+    #[test]
+    fn su2_overrelax_preserves_trace_against_unit_staple() {
+        let mut rng = StdRng::seed_from_u64(1234);
+        for _ in 0..200 {
+            let u = su2_random_haar(&mut rng);
+            let v = su2_random_haar(&mut rng);
+            let t0 = u.mul(v).plaquette_value();
+            let u2 = v.dagger().mul(u.dagger()).mul(v.dagger()).projected();
+            let t1 = u2.mul(v).plaquette_value();
+            approx_eq(t0, t1, 1e-12);
+        }
+    }
+
+    #[test]
+    fn su2_staple_sum_matches_local_cos_sum() {
+        let l = 6usize;
+        let mut rng = StdRng::seed_from_u64(999);
+        let mut field = Su2Gauge3D::new(l);
+        for z in 0..l {
+            for y in 0..l {
+                for x in 0..l {
+                    field.set_link_x(x, y, z, su2_random_haar(&mut rng));
+                    field.set_link_y(x, y, z, su2_random_haar(&mut rng));
+                    field.set_link_z(x, y, z, su2_random_haar(&mut rng));
+                }
+            }
+        }
+
+        for _ in 0..200 {
+            let x = rng.gen_range(0..l);
+            let y = rng.gen_range(0..l);
+            let z = rng.gen_range(0..l);
+
+            let u = field.link_x(x, y, z);
+            let local = local_cos_sum_for_link_x(&field, x, y, z);
+            let staple = staple_sum_for_link_x(&field, x, y, z);
+            let traced = u.mul(staple).plaquette_value();
+            approx_eq(local, traced, 1e-10);
+
+            let u = field.link_y(x, y, z);
+            let local = local_cos_sum_for_link_y(&field, x, y, z);
+            let staple = staple_sum_for_link_y(&field, x, y, z);
+            let traced = u.mul(staple).plaquette_value();
+            approx_eq(local, traced, 1e-10);
+
+            let u = field.link_z(x, y, z);
+            let local = local_cos_sum_for_link_z(&field, x, y, z);
+            let staple = staple_sum_for_link_z(&field, x, y, z);
+            let traced = u.mul(staple).plaquette_value();
+            approx_eq(local, traced, 1e-10);
+        }
     }
 }
