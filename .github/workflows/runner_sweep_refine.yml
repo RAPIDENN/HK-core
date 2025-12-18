@@ -101,7 +101,7 @@ jobs:
           ./target/release/hk-core > server.log 2>&1 &
           echo $! > server.pid
           for _ in $(seq 1 200); do
-            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:8080/health -H "Authorization: Bearer ${AUTH_TOKEN}" >/dev/null 2>&1; then
               exit 0
             fi
             sleep 0.2
@@ -188,4 +188,3 @@ jobs:
             payload.json
             out_seed${{ matrix.seed }}.json
             server.log
-
