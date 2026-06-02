@@ -57,6 +57,13 @@ fn empty_mass_plateau() -> MassPlateau {
     }
 }
 
+fn m_eff_report_values(m_eff: &[f64]) -> Vec<f64> {
+    m_eff
+        .iter()
+        .map(|&x| if x.is_finite() { x } else { 0.0 })
+        .collect()
+}
+
 fn mass_scaling_plateau_from_acc_with_cfg(
     acc: &MassAccumulator,
     cfg: PlateauCfg,
@@ -1586,7 +1593,9 @@ enum IcMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateMode {
     Metropolis,
+    Heatbath,
     Overrelax,
+    HeatbathOverrelax,
     MetropolisOverrelax,
 }
 
@@ -1610,7 +1619,11 @@ fn parse_update_mode_from_env() -> UpdateMode {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
+        Some("heatbath") | Some("hb") => UpdateMode::Heatbath,
         Some("overrelax") | Some("or") => UpdateMode::Overrelax,
+        Some("heatbath_overrelax") | Some("hb_or") | Some("heatbath_or") => {
+            UpdateMode::HeatbathOverrelax
+        }
         Some("metropolis_overrelax") | Some("metro_or") | Some("metropolis_or") => {
             UpdateMode::MetropolisOverrelax
         }
@@ -1721,7 +1734,12 @@ fn local_cos_sum_for_link(
 fn su3_sweep_update(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut StdRng) {
     match parse_update_mode_from_env() {
         UpdateMode::Metropolis => metropolis_sweep(cfg, beta, step_size, rng),
+        UpdateMode::Heatbath => heatbath_sweep(cfg, beta, rng),
         UpdateMode::Overrelax => overrelax_sweep(cfg, rng),
+        UpdateMode::HeatbathOverrelax => {
+            heatbath_sweep(cfg, beta, rng);
+            overrelax_sweep(cfg, rng);
+        }
         UpdateMode::MetropolisOverrelax => {
             metropolis_sweep(cfg, beta, step_size, rng);
             overrelax_sweep(cfg, rng);
@@ -1763,6 +1781,28 @@ fn metropolis_sweep(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut S
     }
 }
 
+fn heatbath_sweep(cfg: &mut Su3Gauge4D, beta: f64, rng: &mut StdRng) {
+    let l = cfg.l;
+    let n_links = DIM * l * l * l * l;
+    for _ in 0..n_links {
+        let dir = rng.gen_range(0..DIM);
+        let x = rng.gen_range(0..l);
+        let y = rng.gen_range(0..l);
+        let z = rng.gen_range(0..l);
+        let w = rng.gen_range(0..l);
+        let old = cfg.link_dir(dir, x, y, z, w);
+        let staple = staple_sum_for_link(cfg, dir, x, y, z, w);
+        cfg.set_link_dir(
+            dir,
+            x,
+            y,
+            z,
+            w,
+            su3_cabibbo_marinari_heatbath_update(old, staple, beta, rng),
+        );
+    }
+}
+
 fn overrelax_sweep(cfg: &mut Su3Gauge4D, rng: &mut StdRng) {
     let l = cfg.l;
     let n_links = DIM * l * l * l * l;
@@ -1792,6 +1832,94 @@ fn su3_projective_overrelax_update(u: Su3, staple_sum: Su3) -> Su3 {
     }
     let v = staple_sum.projected();
     v.mul(u.dagger()).mul(v).projected()
+}
+
+fn su3_cabibbo_marinari_heatbath_update(
+    mut u: Su3,
+    staple_sum: Su3,
+    beta: f64,
+    rng: &mut StdRng,
+) -> Su3 {
+    for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+        let local = u.mul(staple_sum);
+        let q = su2_project_quaternion_from_subgroup(local, i, j);
+        let k2 = su2_quat_norm_sq(q);
+        let h = if k2.is_finite() && k2 > 1e-24 {
+            let k = k2.sqrt();
+            let v_dag = [q[0] / k, -q[1] / k, -q[2] / k, -q[3] / k];
+            let sample = su2_heatbath_sample((2.0 * beta * k / 3.0).max(0.0), rng);
+            su3_from_su2_quaternion_array(i, j, su2_quat_mul(sample, v_dag))
+        } else {
+            su3_random_su2_subgroup_haar(i, j, rng)
+        };
+        u = h.mul(u).projected();
+    }
+    u
+}
+
+fn su2_project_quaternion_from_subgroup(a: Su3, i: usize, j: usize) -> [f64; 4] {
+    let m00 = a.at(i, i);
+    let m01 = a.at(i, j);
+    let m10 = a.at(j, i);
+    let m11 = a.at(j, j);
+    [
+        0.5 * (m00.re + m11.re),
+        0.5 * (m01.im + m10.im),
+        0.5 * (m01.re - m10.re),
+        0.5 * (m00.im - m11.im),
+    ]
+}
+
+fn su2_quat_norm_sq(q: [f64; 4]) -> f64 {
+    q.iter().map(|x| x * x).sum()
+}
+
+fn su2_quat_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    ]
+}
+
+fn su2_modified_normal(param_exp: f64, rng: &mut StdRng) -> f64 {
+    let r0 = rng.gen::<f64>().max(1e-12);
+    let r1 = rng.gen::<f64>();
+    let r2 = rng.gen::<f64>().max(1e-12);
+    let c = (TAU * r1).cos();
+    let v = -((r0.ln() + c * c * r2.ln()) / (2.0 * param_exp));
+    v.max(0.0).sqrt()
+}
+
+fn su2_heatbath_sample_x0(param_exp: f64, rng: &mut StdRng) -> f64 {
+    if !(param_exp.is_finite() && param_exp > 0.0) {
+        return 1.0;
+    }
+    loop {
+        let r = rng.gen::<f64>();
+        let lambda = su2_modified_normal(param_exp, rng);
+        if r * r <= 1.0 - lambda * lambda {
+            return (1.0 - 2.0 * lambda * lambda).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn su2_heatbath_sample(param_exp: f64, rng: &mut StdRng) -> [f64; 4] {
+    let x0 = su2_heatbath_sample_x0(param_exp, rng);
+    let s = (1.0 - x0 * x0).max(0.0).sqrt();
+    let mut x1 = rand_std_normal(rng);
+    let mut x2 = rand_std_normal(rng);
+    let mut x3 = rand_std_normal(rng);
+    let mut n2 = x1 * x1 + x2 * x2 + x3 * x3;
+    while !(n2.is_finite() && n2 > 1e-12) {
+        x1 = rand_std_normal(rng);
+        x2 = rand_std_normal(rng);
+        x3 = rand_std_normal(rng);
+        n2 = x1 * x1 + x2 * x2 + x3 * x3;
+    }
+    let inv = 1.0 / n2.sqrt();
+    [x0, s * x1 * inv, s * x2 * inv, s * x3 * inv]
 }
 
 fn staple_sum_for_link(
@@ -1900,6 +2028,10 @@ fn su3_from_su2_quaternion(i: usize, j: usize, a0: f64, a1: f64, a2: f64, a3: f6
     u.set(j, i, Complex::new(-a2, a1));
     u.set(j, j, Complex::new(a0, -a3));
     u.projected()
+}
+
+fn su3_from_su2_quaternion_array(i: usize, j: usize, q: [f64; 4]) -> Su3 {
+    su3_from_su2_quaternion(i, j, q[0], q[1], q[2], q[3])
 }
 
 fn rand_std_normal(rng: &mut StdRng) -> f64 {
@@ -2460,7 +2592,7 @@ fn build_mass_effective_report(
             l,
             r_max,
             correlator,
-            m_eff,
+            m_eff: m_eff_report_values(&m_eff),
             plateau,
         };
     }
@@ -3090,6 +3222,10 @@ mod su3_kernel_tests {
         best
     }
 
+    fn assert_unit_quaternion(q: [f64; 4], eps: f64) {
+        approx_eq(su2_quat_norm_sq(q), 1.0, eps);
+    }
+
     #[test]
     fn su3_random_haar_is_unitary() {
         let mut rng = StdRng::seed_from_u64(42);
@@ -3164,6 +3300,31 @@ mod su3_kernel_tests {
     }
 
     #[test]
+    fn su2_subgroup_projection_roundtrips_quaternion() {
+        let norm = (0.7_f64 * 0.7 + 0.2 * 0.2 + 0.1 * 0.1 + 0.671 * 0.671).sqrt();
+        let q = [0.7 / norm, 0.2 / norm, -0.1 / norm, 0.671 / norm];
+        for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+            let u = su3_from_su2_quaternion_array(i, j, q);
+            let projected = su2_project_quaternion_from_subgroup(u, i, j);
+            for k in 0..4 {
+                approx_eq(projected[k], q[k], 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn su2_heatbath_sampler_returns_unit_quaternion() {
+        let mut rng = StdRng::seed_from_u64(4242);
+        for param in [0.1, 1.0, 3.0, 12.0] {
+            for _ in 0..64 {
+                let q = su2_heatbath_sample(param, &mut rng);
+                assert_unit_quaternion(q, 1e-10);
+                assert!(q.iter().all(|x| x.is_finite()));
+            }
+        }
+    }
+
+    #[test]
     fn su3_overrelax_smoke_moves_field_and_preserves_unitarity() {
         let mut rng = StdRng::seed_from_u64(2026);
         let before = hot_field(2, 5150);
@@ -3182,6 +3343,33 @@ mod su3_kernel_tests {
         let before = hot_field(2, 6160);
         let mut after = before.clone();
         metropolis_sweep(&mut after, 0.5, 0.8, &mut rng);
+        overrelax_sweep(&mut after, &mut rng);
+
+        assert!(before.plaquette_mean().is_finite());
+        assert!(after.plaquette_mean().is_finite());
+        assert!(max_link_distance_sq(&before, &after) > 1e-16);
+        assert_field_unitary(&after, 1e-8);
+    }
+
+    #[test]
+    fn su3_heatbath_smoke_moves_field_and_preserves_unitarity() {
+        let mut rng = StdRng::seed_from_u64(2028);
+        let before = hot_field(2, 7170);
+        let mut after = before.clone();
+        heatbath_sweep(&mut after, 5.7, &mut rng);
+
+        assert!(before.plaquette_mean().is_finite());
+        assert!(after.plaquette_mean().is_finite());
+        assert!(max_link_distance_sq(&before, &after) > 1e-16);
+        assert_field_unitary(&after, 1e-8);
+    }
+
+    #[test]
+    fn su3_heatbath_overrelax_smoke_moves_field_and_preserves_unitarity() {
+        let mut rng = StdRng::seed_from_u64(2029);
+        let before = hot_field(2, 8180);
+        let mut after = before.clone();
+        heatbath_sweep(&mut after, 5.7, &mut rng);
         overrelax_sweep(&mut after, &mut rng);
 
         assert!(before.plaquette_mean().is_finite());
