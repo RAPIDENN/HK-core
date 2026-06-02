@@ -391,7 +391,6 @@ pub struct OperatorSmearingBest {
     pub criterion: String,
 }
 
-
 const DIM: usize = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -414,15 +413,24 @@ impl Complex {
     }
 
     fn conj(self) -> Self {
-        Self { re: self.re, im: -self.im }
+        Self {
+            re: self.re,
+            im: -self.im,
+        }
     }
 
     fn add(self, b: Self) -> Self {
-        Self { re: self.re + b.re, im: self.im + b.im }
+        Self {
+            re: self.re + b.re,
+            im: self.im + b.im,
+        }
     }
 
     fn sub(self, b: Self) -> Self {
-        Self { re: self.re - b.re, im: self.im - b.im }
+        Self {
+            re: self.re - b.re,
+            im: self.im - b.im,
+        }
     }
 
     fn mul(self, b: Self) -> Self {
@@ -433,7 +441,10 @@ impl Complex {
     }
 
     fn scale(self, s: f64) -> Self {
-        Self { re: self.re * s, im: self.im * s }
+        Self {
+            re: self.re * s,
+            im: self.im * s,
+        }
     }
 
     #[allow(dead_code)]
@@ -449,7 +460,9 @@ struct Su3 {
 
 impl Su3 {
     fn zero() -> Self {
-        Self { m: [Complex::zero(); 9] }
+        Self {
+            m: [Complex::zero(); 9],
+        }
     }
 
     fn identity() -> Self {
@@ -528,11 +541,8 @@ impl Su3 {
         let mut c0 = [self.at(0, 0), self.at(1, 0), self.at(2, 0)];
         let mut c1 = [self.at(0, 1), self.at(1, 1), self.at(2, 1)];
 
-        c0 = normalize_complex_vec(c0).unwrap_or([
-            Complex::one(),
-            Complex::zero(),
-            Complex::zero(),
-        ]);
+        c0 =
+            normalize_complex_vec(c0).unwrap_or([Complex::one(), Complex::zero(), Complex::zero()]);
 
         c1 = orthogonalize_against(c1, c0);
         if normalize_complex_vec(c1).is_none() {
@@ -553,11 +563,8 @@ impl Su3 {
             }
             c1 = best;
         }
-        c1 = normalize_complex_vec(c1).unwrap_or([
-            Complex::zero(),
-            Complex::one(),
-            Complex::zero(),
-        ]);
+        c1 =
+            normalize_complex_vec(c1).unwrap_or([Complex::zero(), Complex::one(), Complex::zero()]);
 
         let c2 = complex_cross_conj(c0, c1);
 
@@ -1569,7 +1576,6 @@ fn run_mill_with_rp(
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IcMode {
     Cold,
@@ -1580,6 +1586,8 @@ enum IcMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateMode {
     Metropolis,
+    Overrelax,
+    MetropolisOverrelax,
 }
 
 fn parse_ic_mode_from_env() -> IcMode {
@@ -1596,8 +1604,18 @@ fn parse_ic_mode_from_env() -> IcMode {
 }
 
 fn parse_update_mode_from_env() -> UpdateMode {
-    let _ = std::env::var("MILL_UPDATE");
-    UpdateMode::Metropolis
+    match std::env::var("MILL_UPDATE")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some("overrelax") | Some("or") => UpdateMode::Overrelax,
+        Some("metropolis_overrelax") | Some("metro_or") | Some("metropolis_or") => {
+            UpdateMode::MetropolisOverrelax
+        }
+        _ => UpdateMode::Metropolis,
+    }
 }
 
 fn init_su3_field(l: usize, rng: &mut StdRng) -> Su3Gauge4D {
@@ -1703,6 +1721,11 @@ fn local_cos_sum_for_link(
 fn su3_sweep_update(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut StdRng) {
     match parse_update_mode_from_env() {
         UpdateMode::Metropolis => metropolis_sweep(cfg, beta, step_size, rng),
+        UpdateMode::Overrelax => overrelax_sweep(cfg, rng),
+        UpdateMode::MetropolisOverrelax => {
+            metropolis_sweep(cfg, beta, step_size, rng);
+            overrelax_sweep(cfg, rng);
+        }
     }
 }
 
@@ -1738,6 +1761,37 @@ fn metropolis_sweep(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut S
             }
         }
     }
+}
+
+fn overrelax_sweep(cfg: &mut Su3Gauge4D, rng: &mut StdRng) {
+    let l = cfg.l;
+    let n_links = DIM * l * l * l * l;
+    for _ in 0..n_links {
+        let dir = rng.gen_range(0..DIM);
+        let x = rng.gen_range(0..l);
+        let y = rng.gen_range(0..l);
+        let z = rng.gen_range(0..l);
+        let w = rng.gen_range(0..l);
+        let old = cfg.link_dir(dir, x, y, z, w);
+        let staple = staple_sum_for_link(cfg, dir, x, y, z, w);
+        cfg.set_link_dir(
+            dir,
+            x,
+            y,
+            z,
+            w,
+            su3_projective_overrelax_update(old, staple),
+        );
+    }
+}
+
+fn su3_projective_overrelax_update(u: Su3, staple_sum: Su3) -> Su3 {
+    let staple_norm_sq = staple_sum.norm_sq();
+    if !(staple_norm_sq.is_finite() && staple_norm_sq > 1e-24) {
+        return u;
+    }
+    let v = staple_sum.projected();
+    v.mul(u.dagger()).mul(v).projected()
 }
 
 fn staple_sum_for_link(
@@ -1796,7 +1850,11 @@ fn su3_random_haar(rng: &mut StdRng) -> Su3 {
 
 fn su3_random_su2_subgroup(i: usize, j: usize, max_angle: f64, rng: &mut StdRng) -> Su3 {
     let angle = rng.gen_range(-max_angle..max_angle);
-    let mut n = [rand_std_normal(rng), rand_std_normal(rng), rand_std_normal(rng)];
+    let mut n = [
+        rand_std_normal(rng),
+        rand_std_normal(rng),
+        rand_std_normal(rng),
+    ];
     let n2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
     if !(n2.is_finite() && n2 > 1e-24) {
         n = [1.0, 0.0, 0.0];
@@ -1806,7 +1864,14 @@ fn su3_random_su2_subgroup(i: usize, j: usize, max_angle: f64, rng: &mut StdRng)
         n[1] *= inv;
         n[2] *= inv;
     }
-    su3_from_su2_quaternion(i, j, angle.cos(), angle.sin() * n[0], angle.sin() * n[1], angle.sin() * n[2])
+    su3_from_su2_quaternion(
+        i,
+        j,
+        angle.cos(),
+        angle.sin() * n[0],
+        angle.sin() * n[1],
+        angle.sin() * n[2],
+    )
 }
 
 fn su3_random_su2_subgroup_haar(i: usize, j: usize, rng: &mut StdRng) -> Su3 {
@@ -2053,7 +2118,6 @@ fn ape_smear_su3(field: &Su3Gauge4D, alpha: f64, steps: usize) -> Su3Gauge4D {
     cur
 }
 
-
 #[derive(Clone, Debug)]
 struct MassBlock {
     n: usize,
@@ -2138,7 +2202,6 @@ impl MassAccumulator {
 
         self.observe_stats(mean_p, &mean_pp);
     }
-
 
     fn observe_stats(&mut self, mean_p: f64, mean_pp: &[f64]) {
         debug_assert_eq!(mean_pp.len(), self.r_max);
@@ -2949,13 +3012,7 @@ mod su3_kernel_tests {
     use super::*;
 
     fn approx_eq(a: f64, b: f64, eps: f64) {
-        assert!(
-            (a - b).abs() <= eps,
-            "expected |{} - {}| <= {}",
-            a,
-            b,
-            eps
-        );
+        assert!((a - b).abs() <= eps, "expected |{} - {}| <= {}", a, b, eps);
     }
 
     fn assert_unitary(u: Su3, eps: f64) {
@@ -2967,6 +3024,70 @@ mod su3_kernel_tests {
                 approx_eq(prod.at(i, j).im, 0.0, eps);
             }
         }
+    }
+
+    fn hot_field(l: usize, seed: u64) -> Su3Gauge4D {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut field = Su3Gauge4D::new(l);
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        field.set_link_x(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_y(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_z(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_w(x, y, z, w, su3_random_haar(&mut rng));
+                    }
+                }
+            }
+        }
+        field
+    }
+
+    fn assert_field_unitary(field: &Su3Gauge4D, eps: f64) {
+        for w in 0..field.l {
+            for z in 0..field.l {
+                for y in 0..field.l {
+                    for x in 0..field.l {
+                        for dir in 0..DIM {
+                            assert_unitary(field.link_dir(dir, x, y, z, w), eps);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn su3_distance_sq(a: Su3, b: Su3) -> f64 {
+        let mut s = 0.0;
+        for i in 0..9 {
+            let dr = a.m[i].re - b.m[i].re;
+            let di = a.m[i].im - b.m[i].im;
+            s += dr * dr + di * di;
+        }
+        s
+    }
+
+    fn max_link_distance_sq(a: &Su3Gauge4D, b: &Su3Gauge4D) -> f64 {
+        let mut best = 0.0;
+        for w in 0..a.l {
+            for z in 0..a.l {
+                for y in 0..a.l {
+                    for x in 0..a.l {
+                        for dir in 0..DIM {
+                            let d = su3_distance_sq(
+                                a.link_dir(dir, x, y, z, w),
+                                b.link_dir(dir, x, y, z, w),
+                            );
+                            if d > best {
+                                best = d;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best
     }
 
     #[test]
@@ -3040,5 +3161,32 @@ mod su3_kernel_tests {
             let traced = u.mul(staple).plaquette_value();
             approx_eq(local, traced, 1e-9);
         }
+    }
+
+    #[test]
+    fn su3_overrelax_smoke_moves_field_and_preserves_unitarity() {
+        let mut rng = StdRng::seed_from_u64(2026);
+        let before = hot_field(2, 5150);
+        let mut after = before.clone();
+        overrelax_sweep(&mut after, &mut rng);
+
+        assert!(before.plaquette_mean().is_finite());
+        assert!(after.plaquette_mean().is_finite());
+        assert!(max_link_distance_sq(&before, &after) > 1e-16);
+        assert_field_unitary(&after, 1e-8);
+    }
+
+    #[test]
+    fn su3_metropolis_overrelax_smoke_moves_field_and_preserves_unitarity() {
+        let mut rng = StdRng::seed_from_u64(2027);
+        let before = hot_field(2, 6160);
+        let mut after = before.clone();
+        metropolis_sweep(&mut after, 0.5, 0.8, &mut rng);
+        overrelax_sweep(&mut after, &mut rng);
+
+        assert!(before.plaquette_mean().is_finite());
+        assert!(after.plaquette_mean().is_finite());
+        assert!(max_link_distance_sq(&before, &after) > 1e-16);
+        assert_field_unitary(&after, 1e-8);
     }
 }
