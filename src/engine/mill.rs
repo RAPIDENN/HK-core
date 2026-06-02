@@ -1,6 +1,7 @@
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::f64::consts::{PI, TAU};
 
 const JK_TARGET_N_BLOCKS: usize = 20;
 
@@ -38,6 +39,22 @@ pub struct MillRunConfig {
 
 fn plateau_width_from_r_range(r_start: usize, r_end: usize) -> usize {
     r_end.saturating_sub(r_start)
+}
+
+fn mass_r_max_for_l(l: usize) -> usize {
+    (l / 2).max(2)
+}
+
+fn empty_mass_plateau() -> MassPlateau {
+    MassPlateau {
+        r_start: 1,
+        r_end: 1,
+        m_eff_mean: 0.0,
+        m_eff_std: 0.0,
+        method: Some("no_positive_correlator_plateau".to_string()),
+        chi2_dof: None,
+        n_points: Some(0),
+    }
 }
 
 fn mass_scaling_plateau_from_acc_with_cfg(
@@ -374,25 +391,248 @@ pub struct OperatorSmearingBest {
     pub criterion: String,
 }
 
-#[derive(Clone, Debug)]
-struct U1Gauge2D {
-    l: usize,
-    tx: Vec<f64>,
-    ty: Vec<f64>,
+
+const DIM: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Complex {
+    re: f64,
+    im: f64,
 }
 
-impl U1Gauge2D {
+impl Complex {
+    const fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+
+    const fn zero() -> Self {
+        Self { re: 0.0, im: 0.0 }
+    }
+
+    const fn one() -> Self {
+        Self { re: 1.0, im: 0.0 }
+    }
+
+    fn conj(self) -> Self {
+        Self { re: self.re, im: -self.im }
+    }
+
+    fn add(self, b: Self) -> Self {
+        Self { re: self.re + b.re, im: self.im + b.im }
+    }
+
+    fn sub(self, b: Self) -> Self {
+        Self { re: self.re - b.re, im: self.im - b.im }
+    }
+
+    fn mul(self, b: Self) -> Self {
+        Self {
+            re: self.re * b.re - self.im * b.im,
+            im: self.re * b.im + self.im * b.re,
+        }
+    }
+
+    fn scale(self, s: f64) -> Self {
+        Self { re: self.re * s, im: self.im * s }
+    }
+
+    #[allow(dead_code)]
+    fn norm_sq(self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Su3 {
+    m: [Complex; 9],
+}
+
+impl Su3 {
+    fn zero() -> Self {
+        Self { m: [Complex::zero(); 9] }
+    }
+
+    fn identity() -> Self {
+        let mut m = [Complex::zero(); 9];
+        m[0] = Complex::one();
+        m[4] = Complex::one();
+        m[8] = Complex::one();
+        Self { m }
+    }
+
+    #[inline]
+    fn idx(row: usize, col: usize) -> usize {
+        3 * row + col
+    }
+
+    #[inline]
+    fn at(self, row: usize, col: usize) -> Complex {
+        self.m[Self::idx(row, col)]
+    }
+
+    #[inline]
+    fn set(&mut self, row: usize, col: usize, v: Complex) {
+        self.m[Self::idx(row, col)] = v;
+    }
+
+    fn dagger(self) -> Self {
+        let mut out = Self::zero();
+        for r in 0..3 {
+            for c in 0..3 {
+                out.set(c, r, self.at(r, c).conj());
+            }
+        }
+        out
+    }
+
+    fn mul(self, b: Self) -> Self {
+        let mut out = Self::zero();
+        for r in 0..3 {
+            for c in 0..3 {
+                let mut s = Complex::zero();
+                for k in 0..3 {
+                    s = s.add(self.at(r, k).mul(b.at(k, c)));
+                }
+                out.set(r, c, s);
+            }
+        }
+        out
+    }
+
+    fn add(self, b: Self) -> Self {
+        let mut out = Self::zero();
+        for i in 0..9 {
+            out.m[i] = self.m[i].add(b.m[i]);
+        }
+        out
+    }
+
+    fn scale(self, s: f64) -> Self {
+        let mut out = Self::zero();
+        for i in 0..9 {
+            out.m[i] = self.m[i].scale(s);
+        }
+        out
+    }
+
+    #[allow(dead_code)]
+    fn norm_sq(self) -> f64 {
+        self.m.iter().map(|z| z.norm_sq()).sum()
+    }
+
+    fn plaquette_value(self) -> f64 {
+        (self.at(0, 0).re + self.at(1, 1).re + self.at(2, 2).re) / 3.0
+    }
+
+    fn projected(self) -> Self {
+        let mut c0 = [self.at(0, 0), self.at(1, 0), self.at(2, 0)];
+        let mut c1 = [self.at(0, 1), self.at(1, 1), self.at(2, 1)];
+
+        c0 = normalize_complex_vec(c0).unwrap_or([
+            Complex::one(),
+            Complex::zero(),
+            Complex::zero(),
+        ]);
+
+        c1 = orthogonalize_against(c1, c0);
+        if normalize_complex_vec(c1).is_none() {
+            let bases = [
+                [Complex::one(), Complex::zero(), Complex::zero()],
+                [Complex::zero(), Complex::one(), Complex::zero()],
+                [Complex::zero(), Complex::zero(), Complex::one()],
+            ];
+            let mut best = bases[1];
+            let mut best_norm = 0.0;
+            for b in bases {
+                let cand = orthogonalize_against(b, c0);
+                let n = complex_vec_norm_sq(cand);
+                if n > best_norm {
+                    best = cand;
+                    best_norm = n;
+                }
+            }
+            c1 = best;
+        }
+        c1 = normalize_complex_vec(c1).unwrap_or([
+            Complex::zero(),
+            Complex::one(),
+            Complex::zero(),
+        ]);
+
+        let c2 = complex_cross_conj(c0, c1);
+
+        let mut out = Self::zero();
+        for r in 0..3 {
+            out.set(r, 0, c0[r]);
+            out.set(r, 1, c1[r]);
+            out.set(r, 2, c2[r]);
+        }
+        out
+    }
+}
+
+fn complex_vec_norm_sq(v: [Complex; 3]) -> f64 {
+    v.iter().map(|z| z.norm_sq()).sum()
+}
+
+fn complex_vec_dot_conj(a: [Complex; 3], b: [Complex; 3]) -> Complex {
+    let mut s = Complex::zero();
+    for i in 0..3 {
+        s = s.add(a[i].conj().mul(b[i]));
+    }
+    s
+}
+
+fn orthogonalize_against(v: [Complex; 3], basis: [Complex; 3]) -> [Complex; 3] {
+    let coeff = complex_vec_dot_conj(basis, v);
+    let mut out = [Complex::zero(); 3];
+    for i in 0..3 {
+        out[i] = v[i].sub(basis[i].mul(coeff));
+    }
+    out
+}
+
+fn normalize_complex_vec(v: [Complex; 3]) -> Option<[Complex; 3]> {
+    let n2 = complex_vec_norm_sq(v);
+    if !(n2.is_finite() && n2 > 1e-24) {
+        return None;
+    }
+    let inv = 1.0 / n2.sqrt();
+    Some([v[0].scale(inv), v[1].scale(inv), v[2].scale(inv)])
+}
+
+fn complex_cross_conj(a: [Complex; 3], b: [Complex; 3]) -> [Complex; 3] {
+    [
+        a[1].mul(b[2]).sub(a[2].mul(b[1])).conj(),
+        a[2].mul(b[0]).sub(a[0].mul(b[2])).conj(),
+        a[0].mul(b[1]).sub(a[1].mul(b[0])).conj(),
+    ]
+}
+
+#[derive(Clone, Debug)]
+struct Su3Gauge4D {
+    l: usize,
+    ux: Vec<Su3>,
+    uy: Vec<Su3>,
+    uz: Vec<Su3>,
+    uw: Vec<Su3>,
+}
+
+impl Su3Gauge4D {
     fn new(l: usize) -> Self {
+        let n = l * l * l * l;
         Self {
             l,
-            tx: vec![0.0; l * l],
-            ty: vec![0.0; l * l],
+            ux: vec![Su3::identity(); n],
+            uy: vec![Su3::identity(); n],
+            uz: vec![Su3::identity(); n],
+            uw: vec![Su3::identity(); n],
         }
     }
 
     #[inline]
-    fn idx(&self, x: usize, y: usize) -> usize {
-        x + self.l * y
+    fn idx(&self, x: usize, y: usize, z: usize, w: usize) -> usize {
+        x + self.l * (y + self.l * (z + self.l * w))
     }
 
     #[inline]
@@ -401,43 +641,162 @@ impl U1Gauge2D {
         (((i % l) + l) % l) as usize
     }
 
-    fn get_tx(&self, x: usize, y: usize) -> f64 {
-        self.tx[self.idx(x, y)]
+    #[inline]
+    fn shift(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+        w: usize,
+        dir: usize,
+        delta: isize,
+    ) -> (usize, usize, usize, usize) {
+        match dir {
+            0 => (self.wrap(x as isize + delta), y, z, w),
+            1 => (x, self.wrap(y as isize + delta), z, w),
+            2 => (x, y, self.wrap(z as isize + delta), w),
+            3 => (x, y, z, self.wrap(w as isize + delta)),
+            _ => unreachable!("invalid lattice direction"),
+        }
     }
 
-    fn get_ty(&self, x: usize, y: usize) -> f64 {
-        self.ty[self.idx(x, y)]
+    fn link_x(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.ux[self.idx(x, y, z, w)]
     }
 
-    fn set_tx(&mut self, x: usize, y: usize, v: f64) {
-        let idx = self.idx(x, y);
-        self.tx[idx] = v;
+    fn link_y(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.uy[self.idx(x, y, z, w)]
     }
 
-    fn set_ty(&mut self, x: usize, y: usize, v: f64) {
-        let idx = self.idx(x, y);
-        self.ty[idx] = v;
+    fn link_z(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.uz[self.idx(x, y, z, w)]
     }
 
-    fn plaquette_angle(&self, x: usize, y: usize) -> f64 {
-        let xp = self.wrap(x as isize + 1);
-        let yp = self.wrap(y as isize + 1);
-        self.get_tx(x, y) + self.get_ty(xp, y) - self.get_tx(x, yp) - self.get_ty(x, y)
+    fn link_w(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.uw[self.idx(x, y, z, w)]
     }
 
-    fn plaquette_cos(&self, x: usize, y: usize) -> f64 {
-        self.plaquette_angle(x, y).cos()
+    fn set_link_x(&mut self, x: usize, y: usize, z: usize, w: usize, v: Su3) {
+        let idx = self.idx(x, y, z, w);
+        self.ux[idx] = v;
+    }
+
+    fn set_link_y(&mut self, x: usize, y: usize, z: usize, w: usize, v: Su3) {
+        let idx = self.idx(x, y, z, w);
+        self.uy[idx] = v;
+    }
+
+    fn set_link_z(&mut self, x: usize, y: usize, z: usize, w: usize, v: Su3) {
+        let idx = self.idx(x, y, z, w);
+        self.uz[idx] = v;
+    }
+
+    fn set_link_w(&mut self, x: usize, y: usize, z: usize, w: usize, v: Su3) {
+        let idx = self.idx(x, y, z, w);
+        self.uw[idx] = v;
+    }
+
+    fn link_dir(&self, dir: usize, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        match dir {
+            0 => self.link_x(x, y, z, w),
+            1 => self.link_y(x, y, z, w),
+            2 => self.link_z(x, y, z, w),
+            3 => self.link_w(x, y, z, w),
+            _ => unreachable!("invalid lattice direction"),
+        }
+    }
+
+    fn set_link_dir(&mut self, dir: usize, x: usize, y: usize, z: usize, w: usize, v: Su3) {
+        match dir {
+            0 => self.set_link_x(x, y, z, w, v),
+            1 => self.set_link_y(x, y, z, w, v),
+            2 => self.set_link_z(x, y, z, w, v),
+            3 => self.set_link_w(x, y, z, w, v),
+            _ => unreachable!("invalid lattice direction"),
+        }
+    }
+
+    fn plaquette_dir(&self, mu: usize, nu: usize, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        let (x_mu, y_mu, z_mu, w_mu) = self.shift(x, y, z, w, mu, 1);
+        let (x_nu, y_nu, z_nu, w_nu) = self.shift(x, y, z, w, nu, 1);
+        let u1 = self.link_dir(mu, x, y, z, w);
+        let u2 = self.link_dir(nu, x_mu, y_mu, z_mu, w_mu);
+        let u3 = self.link_dir(mu, x_nu, y_nu, z_nu, w_nu).dagger();
+        let u4 = self.link_dir(nu, x, y, z, w).dagger();
+        u1.mul(u2).mul(u3).mul(u4)
+    }
+
+    fn plaquette_xy(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(0, 1, x, y, z, w)
+    }
+
+    fn plaquette_xz(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(0, 2, x, y, z, w)
+    }
+
+    fn plaquette_xw(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(0, 3, x, y, z, w)
+    }
+
+    fn plaquette_yz(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(1, 2, x, y, z, w)
+    }
+
+    fn plaquette_yw(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(1, 3, x, y, z, w)
+    }
+
+    fn plaquette_zw(&self, x: usize, y: usize, z: usize, w: usize) -> Su3 {
+        self.plaquette_dir(2, 3, x, y, z, w)
+    }
+
+    fn plaquette_cos_xy(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_xy(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos_xz(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_xz(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos_xw(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_xw(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos_yz(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_yz(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos_yw(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_yw(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos_zw(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        self.plaquette_zw(x, y, z, w).plaquette_value()
+    }
+
+    fn plaquette_cos(&self, x: usize, y: usize, z: usize, w: usize) -> f64 {
+        let pxy = self.plaquette_cos_xy(x, y, z, w);
+        let pxz = self.plaquette_cos_xz(x, y, z, w);
+        let pxw = self.plaquette_cos_xw(x, y, z, w);
+        let pyz = self.plaquette_cos_yz(x, y, z, w);
+        let pyw = self.plaquette_cos_yw(x, y, z, w);
+        let pzw = self.plaquette_cos_zw(x, y, z, w);
+        (pxy + pxz + pxw + pyz + pyw + pzw) / 6.0
     }
 
     fn plaquette_mean(&self) -> f64 {
         let mut s = 0.0;
         let l = self.l;
-        for y in 0..l {
-            for x in 0..l {
-                s += self.plaquette_cos(x, y);
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        s += self.plaquette_cos(x, y, z, w);
+                    }
+                }
             }
         }
-        s / ((l * l) as f64)
+        s / ((l * l * l * l) as f64)
     }
 
     fn plaquette_mean_by_row(&self) -> Vec<f64> {
@@ -445,10 +804,14 @@ impl U1Gauge2D {
         let mut row = vec![0.0; l];
         for y in 0..l {
             let mut s = 0.0;
-            for x in 0..l {
-                s += self.plaquette_cos(x, y);
+            for w in 0..l {
+                for z in 0..l {
+                    for x in 0..l {
+                        s += self.plaquette_cos(x, y, z, w);
+                    }
+                }
             }
-            row[y] = s / (l as f64);
+            row[y] = s / ((l * l * l) as f64);
         }
         row
     }
@@ -650,12 +1013,13 @@ pub fn run_mill_refine(cfg: MillRefineConfig) -> MillRefineOutput {
         &operator_smearing,
         plateau_cfg,
         l_rp,
+        w_min,
         k_sigma,
         verdict_mode,
     );
 
     MillRefineOutput {
-        trace_id: format!("MILL_REFINE_U1_2D_b{}_seed{}", cfg.beta, cfg.seed),
+        trace_id: format!("MILL_REFINE_SU3_4D_b{}_seed{}", cfg.beta, cfg.seed),
         runs,
         convergence: ConvergenceSummary {
             plaquette_mean_deltas: deltas,
@@ -742,6 +1106,7 @@ fn synthesize_final_verdict_with_mode(
     operator_smearing: &OperatorSmearingReport,
     plateau_cfg: PlateauCfg,
     l_max: usize,
+    width_min: usize,
     k_sigma: f64,
     verdict_mode: &str,
 ) -> FinalVerdict {
@@ -764,6 +1129,7 @@ fn synthesize_final_verdict_with_mode(
         operator_smearing,
         plateau_cfg,
         l_max,
+        width_min,
         k_sigma,
         consistency_ok,
     );
@@ -787,11 +1153,12 @@ fn verdict_ir_lmax(
     operator_smearing: &OperatorSmearingReport,
     plateau_cfg: PlateauCfg,
     l_max: usize,
+    width_min: usize,
     k_sigma: f64,
     consistency_ok: bool,
 ) -> (String, IrLmaxVerdictReport) {
     let tested_m0 = vec![0.1, 0.2, 0.3];
-    let width_min = 6usize;
+    let width_min = width_min.max(1);
 
     let (channel, smeared_steps, plateau_width, mean, std, method, chi2_dof) = if consistency_ok {
         let steps = operator_smearing.ape.best.steps;
@@ -1150,22 +1517,21 @@ fn run_mill_with_rp(
     mut smear: Option<&mut OperatorSmearingAccumulator>,
 ) -> MillRunOutput {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
-    let mut field = U1Gauge2D::new(cfg.l);
+    let mut field = init_su3_field(cfg.l, &mut rng);
 
     let thermal = cfg.n_thermal_sweeps;
     for _ in 0..thermal {
-        metropolis_sweep(&mut field, cfg.beta, cfg.step_size, &mut rng);
+        su3_sweep_update(&mut field, cfg.beta, cfg.step_size, &mut rng);
     }
 
-    let measure_every = cfg.measure_every;
+    let measure_every = cfg.measure_every.max(1);
     let mut measurements: Vec<f64> = Vec::new();
 
     for sweep in 0..cfg.n_sweeps {
-        metropolis_sweep(&mut field, cfg.beta, cfg.step_size, &mut rng);
+        su3_sweep_update(&mut field, cfg.beta, cfg.step_size, &mut rng);
         if (sweep + 1) % measure_every == 0 {
             let p = field.plaquette_mean();
             measurements.push(p);
-            let _ = p;
             if let Some(acc) = rp.as_deref_mut() {
                 acc.observe(&field);
             }
@@ -1179,15 +1545,16 @@ fn run_mill_with_rp(
     }
 
     let (plaq_mean, plaq_std) = mean_std(&measurements);
+    let volume = cfg.l * cfg.l * cfg.l * cfg.l;
 
     MillRunOutput {
-        trace_id: format!("MILL_U1_2D_L{}_b{}_seed{}", cfg.l, cfg.beta, cfg.seed),
+        trace_id: format!("MILL_SU3_4D_L{}_b{}_seed{}", cfg.l, cfg.beta, cfg.seed),
         lattice: LatticeSummary {
-            dim: 2,
+            dim: DIM as u8,
             l: cfg.l,
             beta: cfg.beta,
-            n_links: 2 * cfg.l * cfg.l,
-            n_plaquettes: cfg.l * cfg.l,
+            n_links: DIM * volume,
+            n_plaquettes: 6 * volume,
             step_size: cfg.step_size,
         },
         observables: ObservablesSummary {
@@ -1200,6 +1567,63 @@ fn run_mill_with_rp(
             reflection_positivity_estimate: reflection_positivity_estimate(&field),
         },
     }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IcMode {
+    Cold,
+    Hot,
+    Smooth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateMode {
+    Metropolis,
+}
+
+fn parse_ic_mode_from_env() -> IcMode {
+    match std::env::var("MILL_IC")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some("hot") => IcMode::Hot,
+        Some("smooth") => IcMode::Smooth,
+        _ => IcMode::Cold,
+    }
+}
+
+fn parse_update_mode_from_env() -> UpdateMode {
+    let _ = std::env::var("MILL_UPDATE");
+    UpdateMode::Metropolis
+}
+
+fn init_su3_field(l: usize, rng: &mut StdRng) -> Su3Gauge4D {
+    let mode = parse_ic_mode_from_env();
+    let mut field = Su3Gauge4D::new(l);
+    if mode == IcMode::Cold {
+        return field;
+    }
+
+    for w in 0..l {
+        for z in 0..l {
+            for y in 0..l {
+                for x in 0..l {
+                    field.set_link_x(x, y, z, w, su3_random_haar(rng));
+                    field.set_link_y(x, y, z, w, su3_random_haar(rng));
+                    field.set_link_z(x, y, z, w, su3_random_haar(rng));
+                    field.set_link_w(x, y, z, w, su3_random_haar(rng));
+                }
+            }
+        }
+    }
+
+    if mode == IcMode::Smooth {
+        field = ape_smear_su3(&field, 0.5, 10);
+    }
+    field
 }
 
 pub fn analyze_invariance_scaling(runs: &[MillRunOutput]) -> InvarianceScaling {
@@ -1256,49 +1680,167 @@ fn linear_slope_l_vs_value(points: &[InvarianceViolationPoint]) -> Option<f64> {
     }
 }
 
-fn local_cos_sum_for_link_x(cfg: &U1Gauge2D, x: usize, y: usize) -> f64 {
-    let ym = cfg.wrap(y as isize - 1);
-    cfg.plaquette_cos(x, y) + cfg.plaquette_cos(x, ym)
+fn local_cos_sum_for_link(
+    cfg: &Su3Gauge4D,
+    dir: usize,
+    x: usize,
+    y: usize,
+    z: usize,
+    w: usize,
+) -> f64 {
+    let mut s = 0.0;
+    for nu in 0..DIM {
+        if nu == dir {
+            continue;
+        }
+        s += cfg.plaquette_dir(dir, nu, x, y, z, w).plaquette_value();
+        let (xm, ym, zm, wm) = cfg.shift(x, y, z, w, nu, -1);
+        s += cfg.plaquette_dir(dir, nu, xm, ym, zm, wm).plaquette_value();
+    }
+    s
 }
 
-fn local_cos_sum_for_link_y(cfg: &U1Gauge2D, x: usize, y: usize) -> f64 {
-    let xm = cfg.wrap(x as isize - 1);
-    cfg.plaquette_cos(x, y) + cfg.plaquette_cos(xm, y)
+fn su3_sweep_update(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut StdRng) {
+    match parse_update_mode_from_env() {
+        UpdateMode::Metropolis => metropolis_sweep(cfg, beta, step_size, rng),
+    }
 }
 
-fn metropolis_sweep(cfg: &mut U1Gauge2D, beta: f64, step_size: f64, rng: &mut StdRng) {
+fn su3_multi_hit_from_env() -> usize {
+    std::env::var("MILL_SU3_MULTI_HIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1)
+        .min(8)
+}
+
+fn metropolis_sweep(cfg: &mut Su3Gauge4D, beta: f64, step_size: f64, rng: &mut StdRng) {
     let l = cfg.l;
-    let n_links = 2 * l * l;
+    let n_links = DIM * l * l * l * l;
+    let multi_hit = su3_multi_hit_from_env();
     for _ in 0..n_links {
-        let dir_x = rng.gen_bool(0.5);
+        let dir = rng.gen_range(0..DIM);
         let x = rng.gen_range(0..l);
         let y = rng.gen_range(0..l);
-        let delta = rng.gen_range(-step_size..step_size);
-
-        if dir_x {
-            let old = cfg.get_tx(x, y);
-            let old_sum = local_cos_sum_for_link_x(cfg, x, y);
-            let new_val = old + delta;
-            cfg.set_tx(x, y, new_val);
-            let new_sum = local_cos_sum_for_link_x(cfg, x, y);
+        let z = rng.gen_range(0..l);
+        let w = rng.gen_range(0..l);
+        for _ in 0..multi_hit {
+            let r = su3_random_near_identity(step_size, rng);
+            let old = cfg.link_dir(dir, x, y, z, w);
+            let old_sum = local_cos_sum_for_link(cfg, dir, x, y, z, w);
+            cfg.set_link_dir(dir, x, y, z, w, r.mul(old).projected());
+            let new_sum = local_cos_sum_for_link(cfg, dir, x, y, z, w);
             let delta_s = -beta * (new_sum - old_sum);
             let accept = delta_s <= 0.0 || rng.gen::<f64>() < (-delta_s).exp();
             if !accept {
-                cfg.set_tx(x, y, old);
-            }
-        } else {
-            let old = cfg.get_ty(x, y);
-            let old_sum = local_cos_sum_for_link_y(cfg, x, y);
-            let new_val = old + delta;
-            cfg.set_ty(x, y, new_val);
-            let new_sum = local_cos_sum_for_link_y(cfg, x, y);
-            let delta_s = -beta * (new_sum - old_sum);
-            let accept = delta_s <= 0.0 || rng.gen::<f64>() < (-delta_s).exp();
-            if !accept {
-                cfg.set_ty(x, y, old);
+                cfg.set_link_dir(dir, x, y, z, w, old);
             }
         }
     }
+}
+
+fn staple_sum_for_link(
+    cfg: &Su3Gauge4D,
+    dir: usize,
+    x: usize,
+    y: usize,
+    z: usize,
+    w: usize,
+) -> Su3 {
+    let (x_dir, y_dir, z_dir, w_dir) = cfg.shift(x, y, z, w, dir, 1);
+    let mut sum = Su3::zero();
+    for nu in 0..DIM {
+        if nu == dir {
+            continue;
+        }
+        let (x_nu, y_nu, z_nu, w_nu) = cfg.shift(x, y, z, w, nu, 1);
+        let (x_mnu, y_mnu, z_mnu, w_mnu) = cfg.shift(x, y, z, w, nu, -1);
+        let (x_dir_mnu, y_dir_mnu, z_dir_mnu, w_dir_mnu) =
+            cfg.shift(x_mnu, y_mnu, z_mnu, w_mnu, dir, 1);
+
+        let forward = cfg
+            .link_dir(nu, x_dir, y_dir, z_dir, w_dir)
+            .mul(cfg.link_dir(dir, x_nu, y_nu, z_nu, w_nu).dagger())
+            .mul(cfg.link_dir(nu, x, y, z, w).dagger());
+        let backward = cfg
+            .link_dir(nu, x_dir_mnu, y_dir_mnu, z_dir_mnu, w_dir_mnu)
+            .dagger()
+            .mul(cfg.link_dir(dir, x_mnu, y_mnu, z_mnu, w_mnu).dagger())
+            .mul(cfg.link_dir(nu, x_mnu, y_mnu, z_mnu, w_mnu));
+        sum = sum.add(forward).add(backward);
+    }
+    sum
+}
+
+fn su3_random_near_identity(step_size: f64, rng: &mut StdRng) -> Su3 {
+    if !(step_size.is_finite() && step_size > 0.0) {
+        return Su3::identity();
+    }
+    let angle = step_size.abs().min(PI);
+    let r01 = su3_random_su2_subgroup(0, 1, angle, rng);
+    let r02 = su3_random_su2_subgroup(0, 2, angle, rng);
+    let r12 = su3_random_su2_subgroup(1, 2, angle, rng);
+    r12.mul(r02).mul(r01).projected()
+}
+
+fn su3_random_haar(rng: &mut StdRng) -> Su3 {
+    let mut u = Su3::identity();
+    for _ in 0..3 {
+        u = su3_random_su2_subgroup_haar(0, 1, rng).mul(u).projected();
+        u = su3_random_su2_subgroup_haar(0, 2, rng).mul(u).projected();
+        u = su3_random_su2_subgroup_haar(1, 2, rng).mul(u).projected();
+    }
+    u.projected()
+}
+
+fn su3_random_su2_subgroup(i: usize, j: usize, max_angle: f64, rng: &mut StdRng) -> Su3 {
+    let angle = rng.gen_range(-max_angle..max_angle);
+    let mut n = [rand_std_normal(rng), rand_std_normal(rng), rand_std_normal(rng)];
+    let n2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    if !(n2.is_finite() && n2 > 1e-24) {
+        n = [1.0, 0.0, 0.0];
+    } else {
+        let inv = 1.0 / n2.sqrt();
+        n[0] *= inv;
+        n[1] *= inv;
+        n[2] *= inv;
+    }
+    su3_from_su2_quaternion(i, j, angle.cos(), angle.sin() * n[0], angle.sin() * n[1], angle.sin() * n[2])
+}
+
+fn su3_random_su2_subgroup_haar(i: usize, j: usize, rng: &mut StdRng) -> Su3 {
+    let mut q = [
+        rand_std_normal(rng),
+        rand_std_normal(rng),
+        rand_std_normal(rng),
+        rand_std_normal(rng),
+    ];
+    let n2 = q.iter().map(|x| x * x).sum::<f64>();
+    if !(n2.is_finite() && n2 > 1e-24) {
+        q = [1.0, 0.0, 0.0, 0.0];
+    } else {
+        let inv = 1.0 / n2.sqrt();
+        for x in q.iter_mut() {
+            *x *= inv;
+        }
+    }
+    su3_from_su2_quaternion(i, j, q[0], q[1], q[2], q[3])
+}
+
+fn su3_from_su2_quaternion(i: usize, j: usize, a0: f64, a1: f64, a2: f64, a3: f64) -> Su3 {
+    let mut u = Su3::identity();
+    u.set(i, i, Complex::new(a0, a3));
+    u.set(i, j, Complex::new(a2, a1));
+    u.set(j, i, Complex::new(-a2, a1));
+    u.set(j, j, Complex::new(a0, -a3));
+    u.projected()
+}
+
+fn rand_std_normal(rng: &mut StdRng) -> f64 {
+    let u1: f64 = rng.gen::<f64>().max(1e-12);
+    let u2: f64 = rng.gen::<f64>();
+    (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos()
 }
 
 fn mean_std(values: &[f64]) -> (f64, f64) {
@@ -1311,7 +1853,7 @@ fn mean_std(values: &[f64]) -> (f64, f64) {
     (mean, var.sqrt())
 }
 
-fn translation_invariance_row_dev(cfg: &U1Gauge2D) -> f64 {
+fn translation_invariance_row_dev(cfg: &Su3Gauge4D) -> f64 {
     let global = cfg.plaquette_mean();
     let rows = cfg.plaquette_mean_by_row();
     rows.into_iter()
@@ -1319,7 +1861,7 @@ fn translation_invariance_row_dev(cfg: &U1Gauge2D) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn reflection_positivity_estimate(cfg: &U1Gauge2D) -> f64 {
+fn reflection_positivity_estimate(cfg: &Su3Gauge4D) -> f64 {
     let l = cfg.l;
     if l < 2 {
         return f64::NAN;
@@ -1331,9 +1873,13 @@ fn reflection_positivity_estimate(cfg: &U1Gauge2D) -> f64 {
 
     let mut f0 = 0.0;
     let mut f1 = 0.0;
-    for x in 0..l {
-        f0 += cfg.plaquette_cos(x, y0) - mean_p;
-        f1 += cfg.plaquette_cos(x, y1) - mean_p;
+    for w in 0..l {
+        for z in 0..l {
+            for x in 0..l {
+                f0 += cfg.plaquette_cos(x, y0, z, w) - mean_p;
+                f1 += cfg.plaquette_cos(x, y1, z, w) - mean_p;
+            }
+        }
     }
     f0 * f1
 }
@@ -1359,12 +1905,12 @@ impl OperatorSmearingAccumulator {
         Self { alpha, steps, accs }
     }
 
-    fn observe(&mut self, field: &U1Gauge2D) {
+    fn observe(&mut self, field: &Su3Gauge4D) {
         for (i, &k) in self.steps.iter().enumerate() {
             if k == 0 {
                 self.accs[i].observe(field);
             } else {
-                let smeared = ape_smear_u1(field, self.alpha, k);
+                let smeared = ape_smear_su3(field, self.alpha, k);
                 self.accs[i].observe(&smeared);
             }
         }
@@ -1475,60 +2021,38 @@ fn operator_smearing_result_from_plateau(plateau: Option<MassPlateau>) -> Operat
     }
 }
 
-fn c_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    (a.0 + b.0, a.1 + b.1)
-}
-
-fn c_scale(a: (f64, f64), s: f64) -> (f64, f64) {
-    (a.0 * s, a.1 * s)
-}
-
-fn c_exp_i(theta: f64) -> (f64, f64) {
-    (theta.cos(), theta.sin())
-}
-
-fn c_arg(z: (f64, f64)) -> f64 {
-    z.1.atan2(z.0)
-}
-
-fn ape_smear_u1(field: &U1Gauge2D, alpha: f64, steps: usize) -> U1Gauge2D {
+fn ape_smear_su3(field: &Su3Gauge4D, alpha: f64, steps: usize) -> Su3Gauge4D {
     if steps == 0 {
         return field.clone();
     }
     let mut cur = field.clone();
     let l = field.l;
+    let alpha = alpha.clamp(0.0, 1.0);
+    let staple_weight = alpha / (2 * (DIM - 1)) as f64;
     for _ in 0..steps {
         let mut next = cur.clone();
-        for y in 0..l {
-            for x in 0..l {
-                let xp = cur.wrap(x as isize + 1);
-                let xm = cur.wrap(x as isize - 1);
-                let yp = cur.wrap(y as isize + 1);
-                let ym = cur.wrap(y as isize - 1);
-
-                let u = c_exp_i(cur.get_tx(x, y));
-                let staple1 = c_exp_i(cur.get_ty(x, y) + cur.get_tx(x, yp) - cur.get_ty(xp, y));
-                let staple2 = c_exp_i(-cur.get_ty(x, ym) + cur.get_tx(x, ym) + cur.get_ty(xp, ym));
-                let v = c_add(
-                    c_scale(u, 1.0 - alpha),
-                    c_scale(c_add(staple1, staple2), alpha * 0.5),
-                );
-                next.set_tx(x, y, c_arg(v));
-
-                let u = c_exp_i(cur.get_ty(x, y));
-                let staple1 = c_exp_i(cur.get_tx(x, y) + cur.get_ty(xp, y) - cur.get_tx(x, yp));
-                let staple2 = c_exp_i(-cur.get_tx(xm, y) + cur.get_ty(xm, y) + cur.get_tx(xm, yp));
-                let v = c_add(
-                    c_scale(u, 1.0 - alpha),
-                    c_scale(c_add(staple1, staple2), alpha * 0.5),
-                );
-                next.set_ty(x, y, c_arg(v));
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        for dir in 0..DIM {
+                            let old = cur.link_dir(dir, x, y, z, w);
+                            let staples = staple_sum_for_link(&cur, dir, x, y, z, w);
+                            let smeared = old
+                                .scale(1.0 - alpha)
+                                .add(staples.scale(staple_weight))
+                                .projected();
+                            next.set_link_dir(dir, x, y, z, w, smeared);
+                        }
+                    }
+                }
             }
         }
         cur = next;
     }
     cur
 }
+
 
 #[derive(Clone, Debug)]
 struct MassBlock {
@@ -1552,7 +2076,7 @@ struct MassAccumulator {
 
 impl MassAccumulator {
     fn new(l: usize, expected_n_measurements: usize) -> Self {
-        let r_max = (l / 4).max(1);
+        let r_max = mass_r_max_for_l(l);
         let mut block_size = if JK_TARGET_N_BLOCKS > 0 {
             (expected_n_measurements / JK_TARGET_N_BLOCKS).max(1)
         } else {
@@ -1576,35 +2100,45 @@ impl MassAccumulator {
         }
     }
 
-    fn observe(&mut self, field: &U1Gauge2D) {
+    fn observe(&mut self, field: &Su3Gauge4D) {
         let l = self.l;
-        let mut pgrid: Vec<f64> = vec![0.0; l * l];
+        let volume = l * l * l * l;
+        let mut pgrid: Vec<f64> = vec![0.0; volume];
         let mut s = 0.0;
-        for y in 0..l {
-            for x in 0..l {
-                let v = field.plaquette_cos(x, y);
-                pgrid[x + l * y] = v;
-                s += v;
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        let v = field.plaquette_cos(x, y, z, w);
+                        pgrid[x + l * (y + l * (z + l * w))] = v;
+                        s += v;
+                    }
+                }
             }
         }
-        let mean_p = s / ((l * l) as f64);
+        let mean_p = s / (volume as f64);
 
         let mut mean_pp: Vec<f64> = vec![0.0; self.r_max];
         for r in 1..=self.r_max {
             let mut spp = 0.0;
-            for y in 0..l {
-                let y2 = (y + r) % l;
-                for x in 0..l {
-                    let a = pgrid[x + l * y];
-                    let b = pgrid[x + l * y2];
-                    spp += a * b;
+            for w in 0..l {
+                for z in 0..l {
+                    for y in 0..l {
+                        let y2 = (y + r) % l;
+                        for x in 0..l {
+                            let a = pgrid[x + l * (y + l * (z + l * w))];
+                            let b = pgrid[x + l * (y2 + l * (z + l * w))];
+                            spp += a * b;
+                        }
+                    }
                 }
             }
-            mean_pp[r - 1] = spp / ((l * l) as f64);
+            mean_pp[r - 1] = spp / (volume as f64);
         }
 
         self.observe_stats(mean_p, &mean_pp);
     }
+
 
     fn observe_stats(&mut self, mean_p: f64, mean_pp: &[f64]) {
         debug_assert_eq!(mean_pp.len(), self.r_max);
@@ -1654,9 +2188,13 @@ impl MassAccumulator {
         let mut m_eff: Vec<f64> = Vec::new();
         if correlator.len() >= 2 {
             for i in 0..(correlator.len() - 1) {
-                let c0 = correlator[i].abs().max(eps);
-                let c1 = correlator[i + 1].abs().max(eps);
-                m_eff.push((c0 / c1).ln());
+                let c0 = correlator[i];
+                let c1 = correlator[i + 1];
+                if c0.is_finite() && c1.is_finite() && c0 > eps && c1 > eps {
+                    m_eff.push((c0 / c1).ln());
+                } else {
+                    m_eff.push(f64::NAN);
+                }
             }
         }
         (correlator, m_eff)
@@ -1669,15 +2207,7 @@ impl MassAccumulator {
         let (_correlator, m_eff) =
             self.correlator_and_m_eff_from_sums(self.count, self.sum_p, &self.sum_pp);
         if m_eff.len() < 2 {
-            return Some(MassPlateau {
-                r_start: 1,
-                r_end: 2,
-                m_eff_mean: 0.0,
-                m_eff_std: 0.0,
-                method: None,
-                chi2_dof: None,
-                n_points: None,
-            });
+            return Some(empty_mass_plateau());
         }
 
         let rel = if cfg.rel_thresh.is_finite() && cfg.rel_thresh > 0.0 {
@@ -1796,9 +2326,13 @@ impl MassAccumulator {
         let mut m_eff_loo: Vec<f64> = Vec::new();
         if corr_loo.len() >= 2 {
             for i in 0..(corr_loo.len() - 1) {
-                let c0 = corr_loo[i].abs().max(eps);
-                let c1 = corr_loo[i + 1].abs().max(eps);
-                m_eff_loo.push((c0 / c1).ln());
+                let c0 = corr_loo[i];
+                let c1 = corr_loo[i + 1];
+                if c0.is_finite() && c1.is_finite() && c0 > eps && c1 > eps {
+                    m_eff_loo.push((c0 / c1).ln());
+                } else {
+                    m_eff_loo.push(f64::NAN);
+                }
             }
         }
         Some(m_eff_loo)
@@ -1847,7 +2381,7 @@ fn build_mass_effective_report(
     acc: Option<MassAccumulator>,
     plateau_cfg: PlateauCfg,
 ) -> MassEffectiveReport {
-    let mut r_max = (l / 4).max(1);
+    let mut r_max = mass_r_max_for_l(l);
     let mut correlator = vec![0.0; r_max];
     let mut m_eff: Vec<f64> = Vec::new();
     if let Some(a) = acc {
@@ -1881,41 +2415,38 @@ fn build_mass_effective_report(
 
 fn find_mass_plateau(m_eff: &[f64], rel_thresh: f64) -> MassPlateau {
     if m_eff.len() < 2 {
-        return MassPlateau {
-            r_start: 1,
-            r_end: 2,
-            m_eff_mean: 0.0,
-            m_eff_std: 0.0,
-            method: None,
-            chi2_dof: None,
-            n_points: None,
-        };
+        return empty_mass_plateau();
     }
 
-    let mut best_start = 0usize;
-    let mut best_end = 1usize;
-    let mut cur_start = 0usize;
+    let mut best: Option<(usize, usize)> = None;
+    let mut cur_start: Option<usize> = None;
 
     for i in 0..(m_eff.len() - 1) {
         let a = m_eff[i];
         let b = m_eff[i + 1];
+        if !(a.is_finite() && b.is_finite()) {
+            cur_start = None;
+            continue;
+        }
+        let start = *cur_start.get_or_insert(i);
         let denom = a.abs().max(1e-12);
         let rel = (b - a).abs() / denom;
         if rel <= rel_thresh {
             let cur_end = i + 1;
-            if (cur_end - cur_start) > (best_end - best_start) {
-                best_start = cur_start;
-                best_end = cur_end;
+            let replace = best
+                .map(|(best_start, best_end)| (cur_end - start) > (best_end - best_start))
+                .unwrap_or(true);
+            if replace {
+                best = Some((start, cur_end));
             }
         } else {
-            cur_start = i + 1;
+            cur_start = Some(i + 1);
         }
     }
 
-    if best_end <= best_start {
-        best_start = 0;
-        best_end = 1;
-    }
+    let Some((best_start, best_end)) = best else {
+        return empty_mass_plateau();
+    };
 
     let slice = &m_eff[best_start..=best_end];
     let (mean, std) = mean_std(slice);
@@ -2105,7 +2636,7 @@ impl RpAccumulator {
         }
     }
 
-    fn observe(&mut self, field: &U1Gauge2D) {
+    fn observe(&mut self, field: &Su3Gauge4D) {
         let f = f_vec(field, self.l);
         let theta = theta_f_vec(field, self.l);
         for i in 0..3 {
@@ -2172,20 +2703,24 @@ fn build_reflection_positivity_report(
     }
 }
 
-fn region_plaquette_mean(field: &U1Gauge2D, x0: usize, x1: usize, y0: usize, y1: usize) -> f64 {
+fn region_plaquette_mean(field: &Su3Gauge4D, x0: usize, x1: usize, y0: usize, y1: usize) -> f64 {
     let mut s = 0.0;
     let mut n = 0usize;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            s += field.plaquette_cos(x, y);
-            n += 1;
+    for w in 0..field.l {
+        for z in 0..field.l {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    s += field.plaquette_cos(x, y, z, w);
+                    n += 1;
+                }
+            }
         }
     }
     s / (n as f64)
 }
 
 fn region_plaquette_mean_reflect_y(
-    field: &U1Gauge2D,
+    field: &Su3Gauge4D,
     l: usize,
     x0: usize,
     x1: usize,
@@ -2194,46 +2729,58 @@ fn region_plaquette_mean_reflect_y(
 ) -> f64 {
     let mut s = 0.0;
     let mut n = 0usize;
-    for y in y0..y1 {
-        let yr = (l - 1 - y) % l;
-        for x in x0..x1 {
-            s += field.plaquette_cos(x, yr);
-            n += 1;
+    for w in 0..field.l {
+        for z in 0..field.l {
+            for y in y0..y1 {
+                let yr = (l - 1 - y) % l;
+                for x in x0..x1 {
+                    s += field.plaquette_cos(x, yr, z, w);
+                    n += 1;
+                }
+            }
         }
     }
     s / (n as f64)
 }
 
-fn region_neighbor_corr_x(field: &U1Gauge2D, y0: usize, y1: usize) -> f64 {
+fn region_neighbor_corr_x(field: &Su3Gauge4D, y0: usize, y1: usize) -> f64 {
     let l = field.l;
     let mut s = 0.0;
     let mut n = 0usize;
-    for y in y0..y1 {
-        for x in 0..l {
-            let xp = (x + 1) % l;
-            s += field.plaquette_cos(x, y) * field.plaquette_cos(xp, y);
-            n += 1;
+    for w in 0..l {
+        for z in 0..l {
+            for y in y0..y1 {
+                for x in 0..l {
+                    let xp = (x + 1) % l;
+                    s += field.plaquette_cos(x, y, z, w) * field.plaquette_cos(xp, y, z, w);
+                    n += 1;
+                }
+            }
         }
     }
     s / (n as f64)
 }
 
-fn region_neighbor_corr_x_reflect_y(field: &U1Gauge2D, l: usize, y0: usize, y1: usize) -> f64 {
+fn region_neighbor_corr_x_reflect_y(field: &Su3Gauge4D, l: usize, y0: usize, y1: usize) -> f64 {
     let ll = field.l;
     let mut s = 0.0;
     let mut n = 0usize;
-    for y in y0..y1 {
-        let yr = (l - 1 - y) % l;
-        for x in 0..ll {
-            let xp = (x + 1) % ll;
-            s += field.plaquette_cos(x, yr) * field.plaquette_cos(xp, yr);
-            n += 1;
+    for w in 0..ll {
+        for z in 0..ll {
+            for y in y0..y1 {
+                let yr = (l - 1 - y) % l;
+                for x in 0..ll {
+                    let xp = (x + 1) % ll;
+                    s += field.plaquette_cos(x, yr, z, w) * field.plaquette_cos(xp, yr, z, w);
+                    n += 1;
+                }
+            }
         }
     }
     s / (n as f64)
 }
 
-fn f_vec(field: &U1Gauge2D, l: usize) -> [f64; 3] {
+fn f_vec(field: &Su3Gauge4D, l: usize) -> [f64; 3] {
     let half = l / 2;
     let f1 = region_plaquette_mean(field, 0, half, 0, half);
     let f2 = region_plaquette_mean(field, half, l, 0, half);
@@ -2241,14 +2788,13 @@ fn f_vec(field: &U1Gauge2D, l: usize) -> [f64; 3] {
     [f1, f2, f3]
 }
 
-fn theta_f_vec(field: &U1Gauge2D, l: usize) -> [f64; 3] {
+fn theta_f_vec(field: &Su3Gauge4D, l: usize) -> [f64; 3] {
     let half = l / 2;
     let f1 = region_plaquette_mean_reflect_y(field, l, 0, half, 0, half);
     let f2 = region_plaquette_mean_reflect_y(field, l, half, l, 0, half);
     let f3 = region_neighbor_corr_x_reflect_y(field, l, 0, half);
     [f1, f2, f3]
 }
-
 fn jacobi_eigenvalues_3x3(mut a: [[f64; 3]; 3]) -> [f64; 3] {
     for _ in 0..64 {
         let mut p = 0usize;
@@ -2386,7 +2932,7 @@ mod mill_analysis_stats {
 
         let legacy = find_mass_plateau(&m_eff, 0.05);
         let legacy_width = legacy.r_end.saturating_sub(legacy.r_start);
-        assert_eq!(legacy_width, 1);
+        assert_eq!(legacy_width, 0);
     }
 
     #[test]
@@ -2395,5 +2941,104 @@ mod mill_analysis_stats {
         let sigma = vec![1000.0, 1000.0, 1000.0, 1000.0];
         let stat = find_mass_plateau_stat(&m_eff, &sigma, 1e6, 2.0);
         assert!(stat.is_none());
+    }
+}
+
+#[cfg(test)]
+mod su3_kernel_tests {
+    use super::*;
+
+    fn approx_eq(a: f64, b: f64, eps: f64) {
+        assert!(
+            (a - b).abs() <= eps,
+            "expected |{} - {}| <= {}",
+            a,
+            b,
+            eps
+        );
+    }
+
+    fn assert_unitary(u: Su3, eps: f64) {
+        let prod = u.mul(u.dagger());
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                approx_eq(prod.at(i, j).re, expected, eps);
+                approx_eq(prod.at(i, j).im, 0.0, eps);
+            }
+        }
+    }
+
+    #[test]
+    fn su3_random_haar_is_unitary() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for _ in 0..64 {
+            let u = su3_random_haar(&mut rng);
+            assert_unitary(u, 1e-10);
+        }
+    }
+
+    #[test]
+    fn su3_ape_smearing_projects_back_to_su3() {
+        let l = 4usize;
+        let mut rng = StdRng::seed_from_u64(777);
+        let mut field = Su3Gauge4D::new(l);
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        field.set_link_x(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_y(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_z(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_w(x, y, z, w, su3_random_haar(&mut rng));
+                    }
+                }
+            }
+        }
+
+        let smeared = ape_smear_su3(&field, 0.5, 2);
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        for dir in 0..DIM {
+                            assert_unitary(smeared.link_dir(dir, x, y, z, w), 1e-8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn su3_staple_sum_matches_local_cos_sum() {
+        let l = 4usize;
+        let mut rng = StdRng::seed_from_u64(999);
+        let mut field = Su3Gauge4D::new(l);
+        for w in 0..l {
+            for z in 0..l {
+                for y in 0..l {
+                    for x in 0..l {
+                        field.set_link_x(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_y(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_z(x, y, z, w, su3_random_haar(&mut rng));
+                        field.set_link_w(x, y, z, w, su3_random_haar(&mut rng));
+                    }
+                }
+            }
+        }
+
+        for _ in 0..100 {
+            let dir = rng.gen_range(0..DIM);
+            let x = rng.gen_range(0..l);
+            let y = rng.gen_range(0..l);
+            let z = rng.gen_range(0..l);
+            let w = rng.gen_range(0..l);
+            let u = field.link_dir(dir, x, y, z, w);
+            let local = local_cos_sum_for_link(&field, dir, x, y, z, w);
+            let staple = staple_sum_for_link(&field, dir, x, y, z, w);
+            let traced = u.mul(staple).plaquette_value();
+            approx_eq(local, traced, 1e-9);
+        }
     }
 }

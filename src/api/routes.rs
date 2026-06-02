@@ -504,7 +504,7 @@ mod tests {
         let pl = me.get("plateau").unwrap();
         let rs = pl.get("r_start").and_then(|x| x.as_u64()).unwrap();
         let re = pl.get("r_end").and_then(|x| x.as_u64()).unwrap();
-        assert!(rs < re);
+        assert!(rs <= re);
         let pm = pl.get("m_eff_mean").and_then(|x| x.as_f64()).unwrap();
         let ps = pl.get("m_eff_std").and_then(|x| x.as_f64()).unwrap();
         assert!(pm.is_finite());
