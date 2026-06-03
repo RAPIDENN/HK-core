@@ -64,6 +64,10 @@ fn m_eff_report_values(m_eff: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+fn is_positive_mass_point(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
+
 fn mass_scaling_plateau_from_acc_with_cfg(
     acc: &MassAccumulator,
     cfg: PlateauCfg,
@@ -1612,12 +1616,18 @@ fn parse_ic_mode_from_env() -> IcMode {
 }
 
 fn parse_update_mode_from_env() -> UpdateMode {
-    match std::env::var("MILL_UPDATE")
-        .ok()
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
+    update_mode_from_str(
+        std::env::var("MILL_UPDATE")
+            .ok()
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty()),
+    )
+}
+
+fn update_mode_from_str(mode: Option<&str>) -> UpdateMode {
+    match mode.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some("metropolis") | Some("metro") => UpdateMode::Metropolis,
         Some("heatbath") | Some("hb") => UpdateMode::Heatbath,
         Some("overrelax") | Some("or") => UpdateMode::Overrelax,
         Some("heatbath_overrelax") | Some("hb_or") | Some("heatbath_or") => {
@@ -1626,7 +1636,7 @@ fn parse_update_mode_from_env() -> UpdateMode {
         Some("metropolis_overrelax") | Some("metro_or") | Some("metropolis_or") => {
             UpdateMode::MetropolisOverrelax
         }
-        _ => UpdateMode::Metropolis,
+        _ => UpdateMode::HeatbathOverrelax,
     }
 }
 
@@ -2618,7 +2628,7 @@ fn find_mass_plateau(m_eff: &[f64], rel_thresh: f64) -> MassPlateau {
     for i in 0..(m_eff.len() - 1) {
         let a = m_eff[i];
         let b = m_eff[i + 1];
-        if !(a.is_finite() && b.is_finite()) {
+        if !(is_positive_mass_point(a) && is_positive_mass_point(b)) {
             cur_start = None;
             continue;
         }
@@ -2710,18 +2720,19 @@ fn find_mass_plateau_stat(
     let mut best: Option<StatPlateau> = None;
 
     for start in 0..(n - 1) {
-        if !(m_eff[start].is_finite() && sigma[start].is_finite() && sigma[start] > 0.0) {
+        if !(is_positive_mass_point(m_eff[start]) && sigma[start].is_finite() && sigma[start] > 0.0)
+        {
             continue;
         }
         for end in (start + 1)..n {
-            if !(m_eff[end].is_finite() && sigma[end].is_finite() && sigma[end] > 0.0) {
+            if !(is_positive_mass_point(m_eff[end]) && sigma[end].is_finite() && sigma[end] > 0.0) {
                 break;
             }
 
             let mut ok = true;
             for i in start..end {
-                if !(m_eff[i].is_finite()
-                    && m_eff[i + 1].is_finite()
+                if !(is_positive_mass_point(m_eff[i])
+                    && is_positive_mass_point(m_eff[i + 1])
                     && sigma[i].is_finite()
                     && sigma[i + 1].is_finite()
                     && sigma[i] > 0.0
@@ -2757,6 +2768,9 @@ fn find_mass_plateau_stat(
             let Some(mu) = weighted_mean_fixed_weights(window, &weights) else {
                 break;
             };
+            if !is_positive_mass_point(mu) {
+                continue;
+            }
 
             let mut chi2 = 0.0;
             for (&v, &w) in window.iter().zip(weights.iter()) {
@@ -3136,6 +3150,22 @@ mod mill_analysis_stats {
         let stat = find_mass_plateau_stat(&m_eff, &sigma, 1e6, 2.0);
         assert!(stat.is_none());
     }
+
+    #[test]
+    fn mill_plateau_extractors_reject_negative_mass_windows() {
+        let m_eff = vec![-0.30, -0.31, -0.29, -0.30];
+        let sigma = vec![0.05, 0.05, 0.05, 0.05];
+
+        let legacy = find_mass_plateau(&m_eff, 0.2);
+        assert_eq!(plateau_width_from_r_range(legacy.r_start, legacy.r_end), 0);
+        assert_eq!(
+            legacy.method.as_deref(),
+            Some("no_positive_correlator_plateau")
+        );
+
+        let stat = find_mass_plateau_stat(&m_eff, &sigma, 2.0, 2.0);
+        assert!(stat.is_none());
+    }
 }
 
 #[cfg(test)]
@@ -3223,6 +3253,24 @@ mod su3_kernel_tests {
 
     fn assert_unit_quaternion(q: [f64; 4], eps: f64) {
         approx_eq(su2_quat_norm_sq(q), 1.0, eps);
+    }
+
+    #[test]
+    fn su3_update_mode_defaults_to_cabibbo_marinari_overrelax() {
+        assert_eq!(update_mode_from_str(None), UpdateMode::HeatbathOverrelax);
+        assert_eq!(
+            update_mode_from_str(Some("")),
+            UpdateMode::HeatbathOverrelax
+        );
+        assert_eq!(
+            update_mode_from_str(Some("hb_or")),
+            UpdateMode::HeatbathOverrelax
+        );
+        assert_eq!(update_mode_from_str(Some("heatbath")), UpdateMode::Heatbath);
+        assert_eq!(
+            update_mode_from_str(Some("metropolis")),
+            UpdateMode::Metropolis
+        );
     }
 
     #[test]

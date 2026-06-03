@@ -64,6 +64,23 @@
       "ir_std": 0.011027167526323213,
       "ir_chi2_ok": true,
       "per_m0_0p1": "inconclusive"
+    },
+    {
+      "file": "results/4d_su3/beta5p5_seed944_heatbath_positive_plateau_regression.json",
+      "final_status": "inconclusive",
+      "rule": "ORDEN_015_IR_LMAX",
+      "lmax": 12,
+      "ir_l": 12,
+      "ir_channel": "raw",
+      "ir_width": 0,
+      "ir_mean": 0.0,
+      "ir_std": 0.16512217576729935,
+      "ir_chi2_ok": false,
+      "per_m0_0p1": "inconclusive",
+      "update_mode": "heatbath",
+      "beta": 5.5,
+      "seed": 944,
+      "purpose": "positive-mass plateau regression; not a mass-gap claim"
     }
   ]
 }

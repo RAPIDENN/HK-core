@@ -4,25 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to run (e.g. master, su2-3d)"
+        description: "Git ref to run (e.g. master)"
         required: true
-        default: "su2-3d"
+        default: "master"
       ls:
-        description: "Comma-separated L list (e.g. 16,24,32,48). Must be len>=2."
+        description: "Comma-separated L list. SU(3) smoke example: 8,12. Must be len>=2."
         required: true
-        default: "24,32,48"
+        default: "8,12"
       beta:
         description: "beta (f64)"
         required: true
-        default: "1.6"
+        default: "5.5"
       n_thermal_sweeps:
         description: "thermal sweeps"
         required: true
-        default: "2000"
+        default: "120"
       n_sweeps:
         description: "measurement sweeps"
         required: true
-        default: "8000"
+        default: "240"
       measure_every:
         description: "measure_every"
         required: true
@@ -40,7 +40,7 @@ on:
         required: true
         default: "ir_lmax"
       update_mode:
-        description: "MILL_UPDATE: (unset)=metropolis | hb | hb_or (only supported on su2-3d)"
+        description: "MILL_UPDATE: hb_or default | hb | metropolis | metro_or | or"
         required: true
         default: "hb_or"
       seeds:
@@ -93,9 +93,7 @@ jobs:
       - name: Start server
         run: |
           set -euo pipefail
-          if [ "${{ inputs.update_mode }}" = "metropolis" ]; then
-            unset MILL_UPDATE
-          elif [ -n "${{ inputs.update_mode }}" ]; then
+          if [ -n "${{ inputs.update_mode }}" ]; then
             export MILL_UPDATE="${{ inputs.update_mode }}"
           fi
           ./target/release/hk-core > server.log 2>&1 &
