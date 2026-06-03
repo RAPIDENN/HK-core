@@ -816,7 +816,7 @@ impl Su3Gauge4D {
     fn plaquette_mean_by_row(&self) -> Vec<f64> {
         let l = self.l;
         let mut row = vec![0.0; l];
-        for y in 0..l {
+        for (y, row_y) in row.iter_mut().enumerate().take(l) {
             let mut s = 0.0;
             for w in 0..l {
                 for z in 0..l {
@@ -825,7 +825,7 @@ impl Su3Gauge4D {
                     }
                 }
             }
-            row[y] = s / ((l * l * l) as f64);
+            *row_y = s / ((l * l * l) as f64);
         }
         row
     }
@@ -1112,6 +1112,7 @@ fn synthesize_final_verdict(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn synthesize_final_verdict_with_mode(
     raw: &GapCompatibility,
     smeared: &GapCompatibilitySmeared,
@@ -1224,13 +1225,11 @@ fn verdict_ir_lmax(
 
     let mut per_m0: BTreeMap<String, String> = BTreeMap::new();
     for &m0 in tested_m0.iter() {
-        let st = if plateau_width < width_min {
-            "inconclusive"
-        } else if !(mean.is_finite() && std.is_finite()) {
-            "inconclusive"
-        } else if std <= 0.0 {
-            "inconclusive"
-        } else if matches!(chi2_ok, Some(false)) {
+        let invalid_plateau = plateau_width < width_min
+            || !(mean.is_finite() && std.is_finite())
+            || std <= 0.0
+            || matches!(chi2_ok, Some(false));
+        let st = if invalid_plateau {
             "inconclusive"
         } else if mean + k_sigma * std < m0 {
             "incompatible"
@@ -2339,14 +2338,14 @@ impl MassAccumulator {
         debug_assert_eq!(mean_pp.len(), self.r_max);
 
         self.sum_p += mean_p;
-        for i in 0..self.r_max {
-            self.sum_pp[i] += mean_pp[i];
+        for (i, &pp) in mean_pp.iter().enumerate().take(self.r_max) {
+            self.sum_pp[i] += pp;
         }
         self.count += 1;
 
         self.cur_sum_p += mean_p;
-        for i in 0..self.r_max {
-            self.cur_sum_pp[i] += mean_pp[i];
+        for (i, &pp) in mean_pp.iter().enumerate().take(self.r_max) {
+            self.cur_sum_pp[i] += pp;
         }
         self.cur_n += 1;
         if self.cur_n >= self.block_size {
@@ -2509,13 +2508,13 @@ impl MassAccumulator {
         }
         let mean_p = (self.sum_p - b.sum_p) / (n_loo as f64);
         let mut mean_pp = vec![0.0; self.r_max];
-        for i in 0..self.r_max {
-            mean_pp[i] = (self.sum_pp[i] - b.sum_pp[i]) / (n_loo as f64);
+        for (i, pp) in mean_pp.iter_mut().enumerate().take(self.r_max) {
+            *pp = (self.sum_pp[i] - b.sum_pp[i]) / (n_loo as f64);
         }
 
         let mut corr_loo = vec![0.0; self.r_max];
-        for i in 0..self.r_max {
-            corr_loo[i] = mean_pp[i] - mean_p * mean_p;
+        for (i, corr) in corr_loo.iter_mut().enumerate().take(self.r_max) {
+            *corr = mean_pp[i] - mean_p * mean_p;
         }
         let eps = 1e-12;
         let mut m_eff_loo: Vec<f64> = Vec::new();
@@ -2834,9 +2833,9 @@ impl RpAccumulator {
     fn observe(&mut self, field: &Su3Gauge4D) {
         let f = f_vec(field, self.l);
         let theta = theta_f_vec(field, self.l);
-        for i in 0..3 {
-            for j in 0..3 {
-                self.sum[i][j] += theta[i] * f[j];
+        for (i, &theta_i) in theta.iter().enumerate() {
+            for (j, &f_j) in f.iter().enumerate() {
+                self.sum[i][j] += theta_i * f_j;
             }
         }
         self.count += 1;
@@ -2852,15 +2851,15 @@ fn build_reflection_positivity_report(
     if let Some(a) = acc {
         let denom = a.count as f64;
         let mut m = [[0.0; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                m[i][j] = a.sum[i][j] / denom;
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = a.sum[i][j] / denom;
             }
         }
-        for i in 0..3 {
-            for j in 0..3 {
+        for (i, row) in matrix.iter_mut().enumerate().take(3) {
+            for (j, cell) in row.iter_mut().enumerate().take(3) {
                 let sym = 0.5 * (m[i][j] + m[j][i]);
-                matrix[i][j] = sym;
+                *cell = sym;
             }
         }
     }
@@ -3076,11 +3075,11 @@ mod mill_analysis_stats {
             }
         }
 
-        for block in 0..4 {
+        for factor in factors.iter().take(4) {
             for _ in 0..4 {
                 let mut mean_pp = vec![0.0; r_max];
                 for i in 0..r_max {
-                    mean_pp[i] = base_corr[i] * factors[block][i];
+                    mean_pp[i] = base_corr[i] * factor[i];
                 }
                 acc.observe_stats(0.0, &mean_pp);
             }

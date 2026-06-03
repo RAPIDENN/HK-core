@@ -8,16 +8,23 @@
  * (at your option) any later version.
  */
 
-mod engine;
 mod api;
+mod engine;
 
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     let app = api::build_router();
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", 8080)).await.unwrap();
-    tracing::info!("listening on 0.0.0.0:8080");
+    let port: u16 = std::env::var("HK_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    tracing::info!("listening on {}", addr);
     axum::serve(listener, app).await.unwrap();
 }

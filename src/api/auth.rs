@@ -1,8 +1,11 @@
-use axum::{http::{Request, StatusCode}, response::Response};
+use axum::body::Body;
+use axum::{
+    http::{Request, StatusCode},
+    response::Response,
+};
 use futures::future::BoxFuture;
 use tower_layer::Layer;
 use tower_service::Service;
-use axum::body::Body;
 
 #[derive(Clone)]
 pub struct AuthLayer;
@@ -34,7 +37,10 @@ where
     type Error = S::Error;
     type Future = BoxFuture<'static, Result<Response, Self::Error>>;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 

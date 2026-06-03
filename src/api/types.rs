@@ -1,5 +1,5 @@
-use crate::engine::mill::MillRunOutput;
 use crate::engine::mill::MillRefineOutput;
+use crate::engine::mill::MillRunOutput;
 use serde::Serialize;
 
 #[derive(Serialize)]
