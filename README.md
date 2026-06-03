@@ -1,12 +1,12 @@
 # HK-Core: Autonomous Lattice Field Theory Engine
 
-Autonomous lattice gauge simulation engine in Rust. Validated baseline: 2D U(1). Current experimental kernel: 4D SU(3) pure gauge with Cabibbo-Marinari SU(2)-subgroup heatbath updates.
+Autonomous lattice gauge simulation engine in Rust. Validated baseline: 2D U(1). Current active research kernel: 4D SU(3) pure gauge with Cabibbo-Marinari SU(2)-subgroup heatbath updates.
 
-> **Status:** 2D U(1) baseline validated at `L=64`; 4D SU(3) is experimental and has no final mass-gap claim.
+> **Status:** 2D U(1) baseline validated at `L=64`; 4D SU(3) is the current advanced kernel under validation and has no final mass-gap claim yet.
 > **License:** GNU AGPLv3
 
 ## Overview
-HK-Core is a high-performance, autonomous simulation engine written in **Rust**. It keeps the validated **2D U(1) Lattice Gauge Theory** kernel as a regression baseline and now includes an experimental **4D SU(3) pure gauge** kernel for quenched Yang-Mills studies.
+HK-Core is a high-performance, autonomous simulation engine written in **Rust**. It keeps the validated **2D U(1) Lattice Gauge Theory** kernel as a regression baseline and now includes the active **4D SU(3) pure gauge** kernel for quenched Yang-Mills studies.
 
 Unlike traditional academic codes that output raw data for manual analysis, HK-Core acts as an **autonomous scientific instrument**. It incorporates an internal decision engine that performs statistical blocking, self-calibrates via **Jackknife resampling**, and issues binary threshold verdicts without human intervention.
 
