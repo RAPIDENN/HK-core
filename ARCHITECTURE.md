@@ -1,12 +1,12 @@
 # HK-Core: Architecture Map & Status
 
-> **Status:** `master` is the canonical 2D U(1) release line (CI + reproducible validation).  
-> **Branches:** `master` (stable), `su2-3d` (active research), `transition-legacy-3d` (archived transition).
+> **Status:** `master` keeps the validated 2D U(1) baseline and now carries the active 4D SU(3) pure-gauge kernel under validation.
+> **Branches:** `master` (stable baseline + active SU(3) kernel), `su2-3d` (research reference), `transition-legacy-3d` (archived transition).
 
 ## Scope (what this repo is)
 HK-Core is an autonomous “instrument” that runs a lattice toy model (MILL) and produces auditable JSON telemetry plus an explicit decision report.
 
-In `master`, the physics kernel is **2D U(1)**. Other branches extend dimension / gauge group but keep the same API + JSON contract.
+In `master`, the validated regression baseline is **2D U(1)** and the current advanced research kernel is **4D SU(3) pure gauge**. Historical or branch-specific references for **3D U(1)** and **3D SU(2)** are kept under `results/` for audit, but they are not the current production claim.
 
 ## Canonical pipelines (do not mix outputs)
 | Block | Canonical entrypoint | Inputs | Outputs | Notes |
@@ -40,10 +40,15 @@ These should remain stable on `master`:
 ### 2D U(1) baseline (master)
 - IR-Lmax stat threshold check validated at `Lmax=64` for `m0=0.1` (see: `results/2d_u1/beta2_seed777_s60000_stat_ir_lmax.json`).
 
+### 4D SU(3) active kernel (master)
+- Cabibbo-Marinari SU(2)-subgroup heatbath plus overrelaxation is the default SU(3) update path (`MILL_UPDATE=hb_or`).
+- Positive-mass plateau gating rejects negative effective-mass windows.
+- Current tracked regression is `results/4d_su3/beta5p5_seed944_heatbath_positive_plateau_regression.json`; it is a kernel validation artifact, not a final Yang-Mills mass-gap claim.
+
 ### 3D references (research lines)
 - 3D U(1) dim check sample (see: `results/3d_u1/demo_3d_u1_run_L16.json`).
 - 3D SU(2) current max IR reached in saved runs: `Lmax=32`, best observed `ir_lmax.plateau_width=5` (see: `results/3d_su2/ic_test_A_hot_seed777_ls16-32_b1p6_s0p06_th2000_sw8000_me10_stat_ir_lmax.json`).
-- IC coupling instrumentation exists only in `su2-3d` and is documented under `results/README.md`.
+- IC coupling instrumentation belongs to the `su2-3d` research line and is documented under `results/README.md`.
 
 ## Runtime architecture (high level)
 ```mermaid
@@ -59,6 +64,6 @@ flowchart TD
 ## Branch strategy
 | Branch | Status | Purpose |
 |---|---|---|
-| `master` | stable | Canonical 2D U(1) instrument + CI + reproducible validation. |
-| `su2-3d` | active | Research line for SU(2) 3D; must be treated as experimental. |
+| `master` | stable + active validation | Canonical 2D U(1) baseline plus active 4D SU(3) pure-gauge kernel; SU(3) results are not final mass-gap claims. |
+| `su2-3d` | research reference | Research line for SU(2) 3D; must be treated as experimental. |
 | `transition-legacy-3d` | legacy | Historical U(1) 3D transition branch (archived). |
